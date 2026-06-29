@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python orchestrator.py *)",
+      "Bash(python child_agent.py *)",
+      "Bash(python run_demo.py *)",
+      "Bash(python -c *)",
+      "Bash(pip install *)",
+      "Bash(find *)",
+      "Bash(ls *)",
+      "Bash(echo *)",
+      "Bash(cat *)",
+      "Bash(mkdir *)",
+      "Bash(rm *)",
+      "Bash(cp *)",
+      "Bash(touch *)",
+      "Bash(cd *)",
+      "Bash(git *)"
+    ]
+  }
+}
