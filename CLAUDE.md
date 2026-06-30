@@ -2,25 +2,56 @@
 
 ## 项目概述
 
-这是一个 **Claude Code 父子多层嵌套自适应Loop系统**，实现全栈高阶多Agent方案。
+**Claude Code 父子多层嵌套自适应Loop系统** v2.3，全栈高阶多Agent方案。
+
+## 两种使用模式
+
+### 模式A：Python 脚本模式
+
+```bash
+# 简单任务（真实修改文件）
+python orchestrator.py "修改 demo_project/backend/main.py 的端口从8000改为9000"
+
+# 复杂任务（多Agent调度）
+python orchestrator.py "从零搭建全栈用户管理系统"
+
+# 产品迭代循环（持续构建）
+python iterate.py --max-iterations 5 "为项目添加用户认证和日志系统"
+
+# 项目扫描
+python project_scanner.py demo_project --summary
+
+# 完整演示
+python run_demo.py
+```
+
+### 模式B：Claude Code 原生模式（更强大）
+
+直接在对话中说"用loop方法论"或"按loop流程"，Claude Code 将充当 Orchestrator，直接使用其工具链（Read/Write/Edit/Agent/Task/Bash）执行 Loop 四阶段流程，无需 Python 子进程。
 
 ## 核心架构
 
-- `orchestrator.py` - 父调度Agent（核心大脑）
-- `child_agent.py` - 子执行Agent（分布式工人）
-- `config.py` - 全局配置
-- `utils.py` - 工具函数
-
-## 如何调用
-
-当用户请求执行代码任务时，使用以下命令：
-
-```bash
-python orchestrator.py "<任务描述>"
 ```
-
-系统会自动判定任务复杂度并选择合适的执行路径。
+loop-system/
+├── orchestrator.py       # 父调度Agent（大脑）
+├── child_agent.py        # 子执行Agent（工人）
+├── claude_integration.py # Claude AI 集成（API + CLI）
+├── project_scanner.py    # 项目上下文扫描
+├── iterate.py            # 产品迭代循环引擎
+├── checkpoint.py         # 断点续传
+├── git_helper.py         # Git 集成
+├── config.py             # 全局配置
+├── utils.py              # 工具函数
+├── demo_project/         # 演示项目（含真实代码）
+│   ├── backend/          # FastAPI 后端
+│   ├── frontend/         # TypeScript 前端
+│   └── database/         # SQL 数据库
+└── workspaces/           # 子Agent工作区
+```
 
 ## 权限要求
 
-需要 `Bash(python *)` 权限来执行 orchestrator.py 和 child_agent.py。
+- `Bash(python *)` 执行 Python 脚本
+- `Bash(git *)` 版本控制操作
+- `Read/Write/Edit/Glob/Grep` 直接文件操作（原生模式）
+- `Agent/Task` 多Agent调度（原生模式）

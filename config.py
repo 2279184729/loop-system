@@ -19,11 +19,22 @@ LOGS_DIR = BASE_DIR / "logs"
 DEMO_PROJECT_DIR = BASE_DIR / "demo_project"
 
 # ============================================================
-# API配置（隔离内网，仅放行Anthropic API）
+# API配置（从 Claude Code settings.json 读取，与 Claude Code 保持一致）
 # ============================================================
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+# API Key: 支持 ANTHROPIC_API_KEY 和 ANTHROPIC_AUTH_TOKEN 两种环境变量
+ANTHROPIC_API_KEY = (
+    os.environ.get("ANTHROPIC_API_KEY") or
+    os.environ.get("ANTHROPIC_AUTH_TOKEN") or
+    ""
+)
+ANTHROPIC_BASE_URL = os.environ.get(
+    "ANTHROPIC_BASE_URL",
+    "https://dashscope.aliyuncs.com/apps/anthropic"
+)
+ANTHROPIC_MODEL = os.environ.get(
+    "ANTHROPIC_MODEL",
+    "deepseek-v4-pro"
+)
 
 # 网络隔离开关
 DISABLE_NETWORK_CHECK = True

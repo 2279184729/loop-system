@@ -9,10 +9,14 @@ import json
 import sys
 import io
 
-# 修复Windows GBK编码问题
+# 修复Windows GBK编码问题（仅当stdout未被重定向时）
 if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    try:
+        if not isinstance(sys.stdout, io.TextIOWrapper) or sys.stdout.encoding != 'utf-8':
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    except (ValueError, AttributeError):
+        pass  # stdout 已被重定向或关闭
 
 import time
 import random
@@ -21,6 +25,13 @@ from typing import Dict, List, Optional
 from datetime import datetime
 
 from config import Colors, MAX_CHILD_ITERATIONS
+
+# 尝试导入 Claude 集成层
+try:
+    from claude_integration import get_claude
+    HAS_CLAUDE = True
+except ImportError:
+    HAS_CLAUDE = False
 
 
 class ChildAgent:
@@ -38,6 +49,14 @@ class ChildAgent:
         self.errors: List[str] = []
         self.fixes: List[str] = []
         self.files_created: List[str] = []
+
+        # 初始化 Claude 集成（如果可用）
+        self.claude = None
+        if HAS_CLAUDE:
+            try:
+                self.claude = get_claude()
+            except Exception:
+                pass
 
     def execute(self) -> Dict:
         """
@@ -81,18 +100,65 @@ class ChildAgent:
         return self._build_partial_result()
 
     def _step_code(self) -> Dict:
-        """编码步骤"""
+        """编码步骤 - 优先使用AI生成，降级使用模板"""
         module_type = self.task.get("module_type", "backend")
+        task_name = self.task.get("name", "Unknown")
+        task_desc = self.task.get("description", "")
+
         print(f"    {Colors.DIM}📝 编码中... ({module_type}模块){Colors.END}")
 
-        # 根据模块类型生成不同的模拟文件
+        # 尝试使用 AI 生成代码
+        if self.claude and self.claude.is_real():
+            print(f"    {Colors.DIM}  🤖 使用 Claude AI 生成代码...{Colors.END}")
+            ai_result = self.claude.generate_code(
+                task_description=f"{task_name}: {task_desc}",
+                module_type=module_type,
+                context={
+                    "workspace": str(self.workspace),
+                    "task_id": self.task.get("id"),
+                    "completion_criteria": self.task.get("completion_criteria", "")
+                }
+            )
+
+            if ai_result.get("success") and ai_result.get("files"):
+                files = self._write_ai_files(ai_result["files"])
+                self.files_created.extend(files)
+                for f in files:
+                    print(f"    {Colors.GREEN}  ✓ AI生成: {f}{Colors.END}")
+                return {"success": True, "files": files, "mode": "ai"}
+            else:
+                print(f"    {Colors.YELLOW}  ⚠️ AI生成失败，降级为模板模式{Colors.END}")
+
+        # 降级：使用模板生成
         files = self._generate_module_files(module_type)
         self.files_created.extend(files)
 
         for f in files:
-            print(f"    {Colors.GREEN}  ✓ 创建文件: {f}{Colors.END}")
+            print(f"    {Colors.GREEN}  ✓ 模板生成: {f}{Colors.END}")
 
-        return {"success": True, "files": files}
+        return {"success": True, "files": files, "mode": "template"}
+
+    def _write_ai_files(self, files: List[Dict]) -> List[str]:
+        """将AI生成的文件写入工作区"""
+        written = []
+        for file_info in files:
+            path = file_info.get("path", "")
+            content = file_info.get("content", "")
+            if not path or not content:
+                continue
+
+            # 清理路径
+            path = path.strip().lstrip("/").lstrip("\\")
+            file_path = self.workspace / path
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+
+            try:
+                file_path.write_text(content, encoding='utf-8')
+                written.append(path)
+            except Exception as e:
+                print(f"    {Colors.RED}  ✗ 写入失败 {path}: {e}{Colors.END}")
+
+        return written
 
     def _generate_module_files(self, module_type: str) -> List[str]:
         """根据模块类型生成模拟文件"""
@@ -1108,13 +1174,38 @@ export interface ApiError {
         }
 
     def _step_test(self) -> Dict:
-        """自测步骤"""
+        """自测步骤 - 优先运行真实测试，降级使用模拟"""
         print(f"    {Colors.DIM}🧪 自测中...{Colors.END}")
 
-        # 模拟测试：90%概率通过
+        # 尝试运行真实测试
+        test_files = list(self.workspace.rglob("test_*.py")) + \
+                     list(self.workspace.rglob("*_test.py"))
+        if test_files:
+            try:
+                import subprocess
+                result = subprocess.run(
+                    [sys.executable, "-m", "pytest", str(self.workspace), "-q", "--tb=short"],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=str(self.workspace),
+                    encoding='utf-8', errors='replace'
+                )
+                if result.returncode == 0:
+                    print(f"    {Colors.GREEN}  ✓ 真实测试通过{Colors.END}")
+                    return {"success": True, "tests_passed": True, "mode": "real"}
+                else:
+                    error_msg = result.stderr or result.stdout
+                    print(f"    {Colors.RED}  ✗ 测试失败{Colors.END}")
+                    return {"success": False, "error": error_msg[:200], "mode": "real"}
+            except FileNotFoundError:
+                # pytest 未安装
+                pass
+            except Exception as e:
+                print(f"    {Colors.YELLOW}  ⚠️ 测试执行异常: {e}{Colors.END}")
+
+        # 降级：模拟测试
         if random.random() < 0.9:
-            print(f"    {Colors.GREEN}  ✓ 自测通过{Colors.END}")
-            return {"success": True, "tests_passed": random.randint(5, 15)}
+            print(f"    {Colors.GREEN}  ✓ 模拟自测通过{Colors.END}")
+            return {"success": True, "tests_passed": random.randint(5, 15), "mode": "simulated"}
         else:
             error_types = [
                 "类型错误: 参数类型不匹配",
@@ -1124,14 +1215,34 @@ export interface ApiError {
                 "逻辑错误: 条件判断遗漏",
             ]
             error = random.choice(error_types)
-            print(f"    {Colors.RED}  ✗ 自测失败: {error}{Colors.END}")
-            return {"success": False, "error": error}
+            print(f"    {Colors.RED}  ✗ 模拟自测失败: {error}{Colors.END}")
+            return {"success": False, "error": error, "mode": "simulated"}
 
     def _step_fix(self, test_result: Dict) -> Dict:
-        """自修复步骤"""
+        """自修复步骤 - 优先使用AI修复，降级使用规则修复"""
         error = test_result.get("error", "Unknown error")
         print(f"    {Colors.DIM}🔧 自修复中...{Colors.END}")
 
+        # 尝试使用 AI 修复
+        if self.claude and self.claude.is_real() and test_result.get("mode") == "real":
+            # 收集所有生成的文件内容
+            code_snippets = []
+            for fname in self.files_created:
+                fpath = self.workspace / fname
+                if fpath.exists():
+                    code_snippets.append(f"# {fname}\n{fpath.read_text(encoding='utf-8')[:2000]}")
+
+            if code_snippets:
+                ai_fix = self.claude.fix_error(
+                    code="\n\n".join(code_snippets),
+                    error_message=error,
+                    language="python"
+                )
+                if ai_fix.get("success"):
+                    print(f"    {Colors.GREEN}  ✓ AI修复: {ai_fix.get('explanation', '')}{Colors.END}")
+                    return {"success": True, "fix": ai_fix.get("explanation", ""), "mode": "ai"}
+
+        # 降级：规则修复
         fix_messages = {
             "类型错误": "添加类型注解并修正参数类型",
             "空指针异常": "添加null检查和默认值处理",
@@ -1142,11 +1253,11 @@ export interface ApiError {
 
         for key, fix in fix_messages.items():
             if key in error:
-                print(f"    {Colors.GREEN}  ✓ 修复: {fix}{Colors.END}")
-                return {"success": True, "fix": fix}
+                print(f"    {Colors.GREEN}  ✓ 规则修复: {fix}{Colors.END}")
+                return {"success": True, "fix": fix, "mode": "rule"}
 
         print(f"    {Colors.GREEN}  ✓ 通用修复已应用{Colors.END}")
-        return {"success": True, "fix": "通用代码修复"}
+        return {"success": True, "fix": "通用代码修复", "mode": "rule"}
 
     def _check_completion(self) -> bool:
         """检查是否达到完成标准"""

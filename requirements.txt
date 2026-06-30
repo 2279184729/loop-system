@@ -1,0 +1,26 @@
+# Claude Code 父子多层嵌套自适应Loop系统 - 依赖
+# ================================================
+
+# Claude AI 集成
+anthropic>=0.39.0
+
+# Web 框架（子Agent生成后端代码时使用）
+fastapi>=0.110.0
+uvicorn>=0.27.0
+pydantic>=2.0.0
+
+# 测试框架
+pytest>=8.0.0
+pytest-cov>=4.0.0
+pytest-asyncio>=0.23.0
+
+# 前端工具链（子Agent生成前端代码时使用）
+# node / npm 需要单独安装
+
+# 代码质量
+ruff>=0.3.0
+mypy>=1.8.0
+
+# 工具
+httpx>=0.27.0
+python-dotenv>=1.0.0

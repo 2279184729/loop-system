@@ -15,7 +15,13 @@
       "Bash(cp *)",
       "Bash(touch *)",
       "Bash(cd *)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(python *)",
+      "Bash(export ANTHROPIC_API_KEY=\"sk-f25100b18e46476bae1ee6ed6bf94ec8\")",
+      "Bash(setx ANTHROPIC_API_KEY *)",
+      "Bash(export ANTHROPIC_AUTH_TOKEN=\"sk-f25100b18e46476bae1ee6ed6bf94ec8\")",
+      "Bash(export ANTHROPIC_BASE_URL=\"https://dashscope.aliyuncs.com/apps/anthropic\")",
+      "Bash(export ANTHROPIC_MODEL=\"deepseek-v4-pro\")"
     ]
   }
 }

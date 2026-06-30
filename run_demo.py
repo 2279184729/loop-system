@@ -9,10 +9,14 @@ Claude Code 父子多层嵌套自适应Loop系统 - 完整演示
 import sys
 import io
 
-# 修复Windows GBK编码问题
+# 修复Windows GBK编码问题（仅当stdout未被重定向时）
 if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    try:
+        if not isinstance(sys.stdout, io.TextIOWrapper) or sys.stdout.encoding != 'utf-8':
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    except (ValueError, AttributeError):
+        pass  # stdout 已被重定向或关闭
 
 import os
 import time
