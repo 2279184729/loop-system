@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-**Claude Code 父子多层嵌套自适应Loop系统** v2.3，全栈高阶多Agent方案。
+**Claude Code 父子多层嵌套自适应Loop系统** v2.4，全栈高阶多Agent方案。
 
 ## 两种使用模式
 
@@ -10,7 +10,7 @@
 
 ```bash
 # 简单任务（真实修改文件）
-python orchestrator.py "修改 demo_project/backend/main.py 的端口从8000改为9000"
+python orchestrator.py "修改 backend/main.py 的端口从8000改为9000"
 
 # 复杂任务（多Agent调度）
 python orchestrator.py "从零搭建全栈用户管理系统"
@@ -19,10 +19,7 @@ python orchestrator.py "从零搭建全栈用户管理系统"
 python iterate.py --max-iterations 5 "为项目添加用户认证和日志系统"
 
 # 项目扫描
-python project_scanner.py demo_project --summary
-
-# 完整演示
-python run_demo.py
+python project_scanner.py . --summary
 ```
 
 ### 模式B：Claude Code 原生模式（更强大）
@@ -35,17 +32,10 @@ python run_demo.py
 loop-system/
 ├── orchestrator.py       # 父调度Agent（大脑）
 ├── child_agent.py        # 子执行Agent（工人）
-├── claude_integration.py # Claude AI 集成（API + CLI）
 ├── project_scanner.py    # 项目上下文扫描
 ├── iterate.py            # 产品迭代循环引擎
-├── checkpoint.py         # 断点续传
-├── git_helper.py         # Git 集成
 ├── config.py             # 全局配置
 ├── utils.py              # 工具函数
-├── demo_project/         # 演示项目（含真实代码）
-│   ├── backend/          # FastAPI 后端
-│   ├── frontend/         # TypeScript 前端
-│   └── database/         # SQL 数据库
 └── workspaces/           # 子Agent工作区
 ```
 

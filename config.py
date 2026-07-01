@@ -16,7 +16,6 @@ from typing import List, Dict, Optional
 BASE_DIR = Path(__file__).parent.absolute()
 WORKSPACES_DIR = BASE_DIR / "workspaces"
 LOGS_DIR = BASE_DIR / "logs"
-DEMO_PROJECT_DIR = BASE_DIR / "demo_project"
 
 # ============================================================
 # API配置（隔离内网，仅放行Anthropic API）

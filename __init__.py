@@ -12,7 +12,7 @@ from .config import (
     Colors, SubTask, LoopState,
     MAX_PLAN_ITERATIONS, MAX_CHILD_ITERATIONS,
     MAX_GLOBAL_FIX_ITERATIONS, TASK_TIMEOUT,
-    BASE_DIR, WORKSPACES_DIR, LOGS_DIR, DEMO_PROJECT_DIR
+    BASE_DIR, WORKSPACES_DIR, LOGS_DIR
 )
 from .orchestrator import Orchestrator
 from .child_agent import ChildAgent
@@ -35,6 +35,5 @@ __all__ = [
     "BASE_DIR",
     "WORKSPACES_DIR",
     "LOGS_DIR",
-    "DEMO_PROJECT_DIR",
     "__version__",
 ]

@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import (
     Colors, SubTask, LoopState,
     MAX_PLAN_ITERATIONS, MAX_CHILD_ITERATIONS,
-    MAX_GLOBAL_FIX_ITERATIONS, DEMO_PROJECT_DIR,
+    MAX_GLOBAL_FIX_ITERATIONS,
     ORCHESTRATOR_PLANNING_PROMPT, ORCHESTRATOR_EXECUTION_PROMPT,
     ANTHROPIC_MODEL
 )
@@ -45,7 +45,7 @@ class Orchestrator:
     """
 
     def __init__(self, project_dir: str = None):
-        self.project_dir = Path(project_dir) if project_dir else DEMO_PROJECT_DIR
+        self.project_dir = Path(project_dir) if project_dir else Path.cwd()
         self.logger = Logger("orchestrator")
         self.timer = Timer()
         self.state = LoopState()

@@ -25,7 +25,7 @@ from typing import Dict, List, Optional
 from datetime import datetime
 from dataclasses import dataclass, field
 
-from config import Colors, DEMO_PROJECT_DIR
+from config import Colors
 from utils import (
     print_banner, print_phase, print_step, print_success,
     print_error, print_warning, print_info, Timer
@@ -83,7 +83,7 @@ class IterationLoop:
         max_iterations: int = 10,
         auto_commit: bool = True
     ):
-        self.project_dir = Path(project_dir) if project_dir else DEMO_PROJECT_DIR
+        self.project_dir = Path(project_dir) if project_dir else Path.cwd()
         self.max_iterations = max_iterations
         self.auto_commit = auto_commit
 
@@ -439,7 +439,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python iterate.py "为 demo_project 添加用户认证和日志系统"
+  python iterate.py "为项目添加用户认证和日志系统"
   python iterate.py --max-iterations 3 "重构项目代码结构"
   python iterate.py --no-commit "添加单元测试覆盖"
   python iterate.py --project-dir ./my-app "添加API文档和错误处理"
@@ -448,7 +448,7 @@ def main():
     parser.add_argument("goal", nargs="?", default="增强项目功能和代码质量",
                         help="产品迭代目标")
     parser.add_argument("--project-dir", "-d", default=None,
-                        help="项目目录 (默认: demo_project)")
+                        help="项目目录 (默认: 当前目录)")
     parser.add_argument("--max-iterations", "-n", type=int, default=5,
                         help="最大迭代次数 (默认: 5)")
     parser.add_argument("--no-commit", action="store_true",
