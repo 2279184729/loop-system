@@ -19,22 +19,11 @@ LOGS_DIR = BASE_DIR / "logs"
 DEMO_PROJECT_DIR = BASE_DIR / "demo_project"
 
 # ============================================================
-# API配置（从 Claude Code settings.json 读取，与 Claude Code 保持一致）
+# API配置（隔离内网，仅放行Anthropic API）
 # ============================================================
-# API Key: 支持 ANTHROPIC_API_KEY 和 ANTHROPIC_AUTH_TOKEN 两种环境变量
-ANTHROPIC_API_KEY = (
-    os.environ.get("ANTHROPIC_API_KEY") or
-    os.environ.get("ANTHROPIC_AUTH_TOKEN") or
-    ""
-)
-ANTHROPIC_BASE_URL = os.environ.get(
-    "ANTHROPIC_BASE_URL",
-    "https://dashscope.aliyuncs.com/apps/anthropic"
-)
-ANTHROPIC_MODEL = os.environ.get(
-    "ANTHROPIC_MODEL",
-    "deepseek-v4-pro"
-)
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 # 网络隔离开关
 DISABLE_NETWORK_CHECK = True
@@ -135,3 +124,139 @@ class Colors:
             except:
                 return False
         return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+
+# ============================================================
+# Claude API 工具定义
+# ============================================================
+TOOL_DEFINITIONS = [
+    {
+        "name": "read_file",
+        "description": "读取指定路径的文件内容。用于理解现有代码、配置或文档。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "要读取的文件路径（相对于工作区的路径或绝对路径）"
+                }
+            },
+            "required": ["path"]
+        }
+    },
+    {
+        "name": "write_file",
+        "description": "创建或覆盖文件。用于生成新代码、配置或文档文件。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "要写入的文件路径（相对于工作区）"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "要写入的完整文件内容"
+                }
+            },
+            "required": ["path", "content"]
+        }
+    },
+    {
+        "name": "edit_file",
+        "description": "编辑文件中的特定部分。通过精确匹配 old_string 并替换为 new_string 来修改文件。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "要编辑的文件路径（相对于工作区）"
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "要替换的原始文本（必须精确匹配）"
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "替换后的新文本"
+                }
+            },
+            "required": ["path", "old_string", "new_string"]
+        }
+    },
+    {
+        "name": "run_command",
+        "description": "执行 shell 命令并返回输出。用于运行测试、lint、构建等命令。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "要执行的 shell 命令"
+                }
+            },
+            "required": ["command"]
+        }
+    }
+]
+
+# ============================================================
+# Claude API 系统提示词
+# ============================================================
+ORCHESTRATOR_PLANNING_PROMPT = """你是一个资深技术架构师。分析用户的任务需求，生成详细的实施方案。
+
+返回严格的 JSON 格式（不要包含 markdown 代码块标记）：
+{
+  "architecture": "架构设计简述（1-2句话）",
+  "modules": ["模块1", "模块2"],
+  "tech_stack": {"语言/框架": "版本/说明"},
+  "subtasks": [
+    {
+      "id": "SUB-001",
+      "name": "子任务名称",
+      "description": "详细的实现说明，包含具体要做什么、涉及哪些文件",
+      "module_type": "backend|frontend|database|config",
+      "dependencies": [],
+      "priority": 0,
+      "completion_criteria": "具体的完成标准，如：所有测试通过、编译无错误、功能可运行"
+    }
+  ]
+}
+
+规则：
+- 将复杂任务拆分为 2-6 个独立可执行的原子子任务
+- dependencies 引用其他子任务的 id（如 ["SUB-001"]），无依赖则为空数组
+- priority 0=最高优先级，数字越大优先级越低
+- module_type 决定子任务的代码类型：database(数据库DDL/迁移)、backend(后端API/服务)、frontend(前端页面/组件)、config(配置/工程化/测试)
+- 每个子任务必须有明确的 completion_criteria"""
+
+ORCHESTRATOR_EXECUTION_PROMPT = """你是一个全栈软件工程师，负责执行编程任务。你可以使用工具来读取文件、编写代码、编辑文件和运行命令。
+
+工作流程：
+1. 先用 read_file 了解现有代码结构
+2. 用 write_file 创建新文件或用 edit_file 修改现有文件
+3. 用 run_command 运行测试、lint 或构建命令来验证你的修改
+4. 如果测试失败，分析错误并修复
+5. 确认所有测试通过后，总结你做了什么
+
+重要原则：
+- 只修改与任务直接相关的代码，不要重构无关代码
+- 保持代码风格与现有代码一致
+- 编写简洁、可工作的代码，不要过度设计
+- 完成后运行测试验证"""
+
+CHILD_AGENT_SYSTEM_PROMPT = """你是一个多Agent系统中的专业工作者Agent，负责实现一个特定的模块或功能。
+
+你的工作区是隔离的——你只能写入工作区目录内的文件。但你可以读取项目目录中的文件来理解上下文。
+
+工作流程：
+1. 阅读项目中的相关文件，理解现有架构和代码风格
+2. 在工作区中创建/修改你负责的模块文件
+3. 运行测试验证你的代码
+4. 如果测试失败，分析错误并修复
+5. 确认完成标准已满足后，报告完成
+
+重要原则：
+- 只专注于分配给你的子任务，不要越界做其他模块的工作
+- 生成生产级质量的代码，包含适当的错误处理和类型注解
+- 确保你的代码可以独立运行和测试
+- 完成后明确说明你完成了什么以及为什么完成标准已满足"""

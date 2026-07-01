@@ -14,15 +14,12 @@ import sys
 import os
 import io
 
-# 修复Windows GBK编码问题（仅当stdout未被重定向时）
+# 修复Windows GBK编码问题
 if sys.platform == 'win32':
-    try:
-        if not isinstance(sys.stdout, io.TextIOWrapper) or sys.stdout.encoding != 'utf-8':
-            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-    except (ValueError, AttributeError):
-        pass  # stdout 已被重定向或关闭
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,20 +27,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import (
     Colors, SubTask, LoopState,
     MAX_PLAN_ITERATIONS, MAX_CHILD_ITERATIONS,
-    MAX_GLOBAL_FIX_ITERATIONS, DEMO_PROJECT_DIR
+    MAX_GLOBAL_FIX_ITERATIONS, DEMO_PROJECT_DIR,
+    ORCHESTRATOR_PLANNING_PROMPT, ORCHESTRATOR_EXECUTION_PROMPT,
+    ANTHROPIC_MODEL
 )
 from utils import (
     print_banner, print_phase, print_step, print_success,
     print_error, print_warning, print_info, print_subtask,
-    analyze_complexity, Logger, Timer, setup_workspace, run_child_agent
+    analyze_complexity, Logger, Timer, setup_workspace, run_child_agent,
+    create_llm_client, run_agent_loop
 )
-
-# 尝试导入 Claude 集成层
-try:
-    from claude_integration import get_claude, ClaudeIntegration
-    HAS_CLAUDE = True
-except ImportError:
-    HAS_CLAUDE = False
 
 
 class Orchestrator:
@@ -59,19 +52,6 @@ class Orchestrator:
         self.subtasks: List[SubTask] = []
         self.plan: Optional[Dict] = None
         self.all_results: List[Dict] = []
-        self._global_issue_round = 0  # 追踪全局修复轮次
-
-        # 初始化 Claude 集成（如果可用）
-        self.claude = None
-        if HAS_CLAUDE:
-            try:
-                self.claude = get_claude()
-                if self.claude.is_real():
-                    print_info(f"Claude AI 集成已启用 (模式: {self.claude.mode})")
-                else:
-                    print_warning("Claude AI 未配置，使用模拟模式")
-            except Exception as e:
-                print_warning(f"Claude 集成初始化失败: {e}")
 
     def execute(self, task_description: str) -> Dict:
         """
@@ -108,373 +88,34 @@ class Orchestrator:
             return self._execute_complex(task_description)
 
     # ================================================================
-    # 简单任务执行路径（极速直出）
+    # 简单任务执行路径（直接调用 Claude API + Tool Use）
     # ================================================================
     def _execute_simple(self, task_description: str) -> Dict:
-        print_banner("⚡ 简单任务模式：极速直出", Colors.GREEN)
+        print_banner("⚡ 简单任务模式：直接执行", Colors.GREEN)
         self.state.phase = "direct_execute"
-        execution_steps = []
-        files_modified = []
 
-        # ---- Step 1: 扫描项目 ----
-        print_step("扫描项目文件结构...")
-        project_files = self._scan_project_files()
-        execution_steps.append(f"扫描到 {len(project_files)} 个文件")
-        print_success(f"扫描到 {len(project_files)} 个文件")
-
-        # ---- Step 2: 定位目标文件 ----
-        print_step("定位目标文件...")
-        target_files = self._find_relevant_files(task_description, project_files)
-        if not target_files:
-            print_warning("未找到精确匹配文件，使用最相关文件")
-            target_files = project_files[:5]  # fallback to first 5 files
-
-        for f in target_files[:5]:  # 最多处理5个文件
-            print_info(f"  定位: {f['rel_path']}")
-        execution_steps.append(f"定位到 {len(target_files)} 个相关文件")
-
-        # ---- Step 3: 读取文件内容 ----
-        print_step("读取目标文件内容...")
-        file_contents = {}
-        for f in target_files[:5]:
-            try:
-                content = f["path"].read_text(encoding='utf-8')
-                file_contents[f["rel_path"]] = content
-                print_info(f"  读取: {f['rel_path']} ({len(content)} 字符)")
-            except Exception as e:
-                print_warning(f"  读取失败: {f['rel_path']} - {e}")
-
-        if not file_contents:
-            print_error("无法读取任何目标文件")
-            return {
-                "mode": "simple", "task": task_description,
-                "execution_steps": execution_steps, "files_modified": [],
-                "elapsed_seconds": round(self.timer.elapsed(), 2),
-                "child_agents_used": 0, "status": "failed"
-            }
-        execution_steps.append(f"读取 {len(file_contents)} 个文件")
-
-        # ---- Step 4: 生成修改方案 ----
-        print_step("生成修改方案...")
-
-        # 尝试使用 AI 生成修改
-        modifications = self._generate_simple_fix(task_description, file_contents)
-
-        if not modifications:
-            print_warning("无法生成修改方案")
-            return {
-                "mode": "simple", "task": task_description,
-                "execution_steps": execution_steps, "files_modified": [],
-                "elapsed_seconds": round(self.timer.elapsed(), 2),
-                "child_agents_used": 0, "status": "no_changes"
-            }
-        execution_steps.append(f"生成 {len(modifications)} 处修改")
-
-        # ---- Step 5: 应用修改 ----
-        print_step("应用代码修改...")
-        for mod in modifications:
-            # 规范化路径：移除可能的 project_dir 前缀
-            mod_file = mod["file"]
-            project_dir_name = self.project_dir.name
-            if mod_file.startswith(project_dir_name + "/") or mod_file.startswith(project_dir_name + "\\"):
-                mod_file = mod_file[len(project_dir_name) + 1:]
-
-            file_path = self.project_dir / mod_file
-            try:
-                if mod["type"] == "replace":
-                    content = file_path.read_text(encoding='utf-8')
-                    if mod["old"] in content:
-                        new_content = content.replace(mod["old"], mod["new"], 1)
-                        file_path.write_text(new_content, encoding='utf-8')
-                        files_modified.append(str(mod["file"]))
-                        print_success(f"  修改: {mod['file']} - {mod.get('description', '')}")
-                    else:
-                        print_warning(f"  未找到匹配文本: {mod['file']}")
-                elif mod["type"] == "append":
-                    with open(file_path, 'a', encoding='utf-8') as fp:
-                        fp.write("\n" + mod["content"])
-                    files_modified.append(str(mod["file"]))
-                    print_success(f"  追加: {mod['file']} - {mod.get('description', '')}")
-            except Exception as e:
-                print_error(f"  修改失败: {mod['file']} - {e}")
-
-        execution_steps.append(f"修改 {len(files_modified)} 个文件")
-
-        # ---- Step 6: 验证 ----
-        print_step("验证修改...")
-        verified = self._verify_simple_changes(files_modified)
-        if verified["success"]:
-            print_success(f"验证通过: {verified['message']}")
-        else:
-            print_warning(f"验证提示: {verified['message']}")
-        execution_steps.append(verified["message"])
+        workspace = str(self.project_dir)
+        result = run_agent_loop(
+            task_description=task_description,
+            workspace=workspace,
+            system_prompt=ORCHESTRATOR_EXECUTION_PROMPT,
+            project_dir=workspace,
+            max_iterations=10
+        )
 
         self.state.phase = "done"
         elapsed = self.timer.elapsed()
 
-        result = {
+        return {
             "mode": "simple",
             "task": task_description,
-            "execution_steps": execution_steps,
-            "files_modified": files_modified,
+            "result": result.get("result", ""),
+            "iterations": result.get("iterations", 0),
+            "files_created": result.get("files_created", []),
             "elapsed_seconds": round(elapsed, 2),
             "child_agents_used": 0,
-            "status": "completed" if files_modified else "no_changes"
+            "status": "completed" if result["success"] else "partial"
         }
-
-        print_banner(
-            f"✅ 简单任务闭环完成 | 修改{len(files_modified)}个文件 | 耗时{elapsed:.2f}秒 | 零子进程",
-            Colors.GREEN
-        )
-        return result
-
-    def _scan_project_files(self) -> List[Dict]:
-        """扫描项目目录，返回文件列表"""
-        files = []
-        skip_dirs = {'.git', '__pycache__', '.checkpoints', 'node_modules',
-                     'workspaces', 'logs', '.claude', 'venv', '.venv'}
-        skip_extensions = {'.pyc', '.pyo', '.pkl', '.log', '.lock'}
-
-        if not self.project_dir.exists():
-            return files
-
-        for file_path in self.project_dir.rglob("*"):
-            if file_path.is_file():
-                # 跳过忽略目录
-                parts = file_path.parts
-                if any(d in skip_dirs for d in parts):
-                    continue
-                if file_path.suffix in skip_extensions:
-                    continue
-                try:
-                    rel = file_path.relative_to(self.project_dir)
-                    files.append({
-                        "path": file_path,
-                        "rel_path": str(rel),
-                        "name": file_path.name,
-                        "suffix": file_path.suffix,
-                        "size": file_path.stat().st_size
-                    })
-                except Exception:
-                    pass
-        return files
-
-    def _find_relevant_files(
-        self, task: str, project_files: List[Dict]
-    ) -> List[Dict]:
-        """根据任务描述找到相关文件"""
-        task_lower = task.lower()
-        scored = []
-
-        # 首先尝试从任务描述中提取显式文件路径
-        explicit_paths = []
-        for f in project_files:
-            rel_lower = f["rel_path"].lower().replace("\\", "/")
-            # 检查任务中是否直接提到了这个文件路径
-            if rel_lower in task_lower or f["name"].lower() in task_lower:
-                explicit_paths.append(f)
-
-        if explicit_paths:
-            return explicit_paths
-
-        for f in project_files:
-            score = 0
-            name_lower = f["name"].lower()
-            rel_lower = f["rel_path"].lower().replace("\\", "/")
-
-            # 文件名匹配
-            keywords = task_lower.split()
-            for kw in keywords:
-                if len(kw) >= 3 and kw in name_lower:
-                    score += 3
-                if len(kw) >= 3 and kw in rel_lower:
-                    score += 1
-
-            # 扩展名匹配
-            if "api" in task_lower or "接口" in task_lower:
-                if f["suffix"] in {".py", ".ts", ".js"}:
-                    score += 2
-            if "页面" in task_lower or "前端" in task_lower or "frontend" in task_lower:
-                if f["suffix"] in {".tsx", ".jsx", ".html", ".css", ".ts"}:
-                    score += 2
-            if "数据库" in task_lower or "database" in task_lower or "sql" in task_lower:
-                if f["suffix"] in {".sql", ".py"}:
-                    score += 2
-            if "配置" in task_lower or "config" in task_lower:
-                if f["suffix"] in {".json", ".yaml", ".yml", ".toml", ".env", ".cfg", ".ini"}:
-                    score += 2
-
-            if score > 0:
-                scored.append((score, f))
-
-        # 按分数降序排列
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [f for _, f in scored]
-
-    def _generate_simple_fix(
-        self, task: str, file_contents: Dict[str, str]
-    ) -> List[Dict]:
-        """
-        生成简单修复方案
-        优先使用 AI，降级使用规则匹配
-        """
-        modifications = []
-
-        # 尝试使用 AI 生成修复
-        if self.claude and self.claude.is_real():
-            ai_mods = self._ai_generate_fix(task, file_contents)
-            if ai_mods:
-                return ai_mods
-
-        # 降级：规则匹配
-        task_lower = task.lower()
-
-        for filepath, content in file_contents.items():
-            # 模式1: 修改端口号
-            if "端口" in task_lower or "port" in task_lower:
-                import re
-                old_port_match = re.search(r'port\s*[=:]\s*(\d+)', content)
-                # 提取"改为XXXX"中的新端口
-                new_port_match = re.search(r'(?:改为|改成|改为\s*|->\s*|→\s*)(\d+)', task)
-                if not new_port_match:
-                    # fallback: 取最后一个4位数字
-                    all_nums = re.findall(r'\d{4}', task)
-                    new_port_match = all_nums[-1] if all_nums else None
-                if old_port_match and new_port_match:
-                    old_port = old_port_match.group(1)
-                    new_port = new_port_match if isinstance(new_port_match, str) else new_port_match.group(1)
-                    if old_port != new_port:
-                        modifications.append({
-                            "file": filepath,
-                            "type": "replace",
-                            "old": f"port={old_port}",
-                            "new": f"port={new_port}",
-                            "description": f"端口 {old_port} → {new_port}"
-                        })
-
-            # 模式2: 修改超时时间
-            if "超时" in task_lower or "timeout" in task_lower:
-                import re
-                old_timeout = re.search(r'timeout[=:]\s*(\d+)', content)
-                new_timeout_match = re.search(r'(\d+)\s*秒', task)
-                if old_timeout and new_timeout_match:
-                    modifications.append({
-                        "file": filepath,
-                        "type": "replace",
-                        "old": old_timeout.group(0),
-                        "new": f"timeout={new_timeout_match.group(1)}",
-                        "description": f"超时时间修改"
-                    })
-
-            # 模式3: 添加字段
-            if "添加" in task_lower and ("字段" in task_lower or "field" in task_lower):
-                import re
-                field_match = re.search(r'(\w+)\s*(?:字段|field)', task_lower)
-                if field_match:
-                    field_name = field_match.group(1)
-                    # 在类定义中找一个合适的位置插入（在最后一个字段之后，第一个方法之前）
-                    lines = content.split('\n')
-                    insert_line = None
-                    last_field_line = -1
-
-                    for i, line in enumerate(lines):
-                        stripped = line.strip()
-                        # 找到类定义后的字段
-                        if stripped.startswith('@') or (stripped and not stripped.startswith('def ') and ':' in stripped and '=' not in stripped and '(' not in stripped):
-                            pass
-                        # 找到最后一个带类型注解的字段行
-                        if re.match(r'\s{4}\w+\s*:\s*', line):
-                            last_field_line = i
-
-                    if last_field_line >= 0:
-                        # 在最后一个字段后插入
-                        indent = " " * 4
-                        new_line = f'{indent}{field_name}: Optional[str] = None  # 自动添加字段'
-                        lines.insert(last_field_line + 1, new_line)
-                        new_content = '\n'.join(lines)
-                        modifications.append({
-                            "file": filepath,
-                            "type": "replace",
-                            "old": content,
-                            "new": new_content,
-                            "description": f"在类中添加字段 {field_name}"
-                        })
-
-            # 模式4: 修复Bug - 添加空指针检查
-            if "bug" in task_lower or "修复" in task_lower or "空指针" in task_lower:
-                if "def " in content and "null" not in content.lower():
-                    # 在函数定义后面添加参数校验
-                    modifications.append({
-                        "file": filepath,
-                        "type": "replace",
-                        "old": "def ",
-                        "new": "# 添加参数校验（自动修复）\n    def ",
-                        "description": "添加空指针保护"
-                    })
-
-        return modifications
-
-    def _ai_generate_fix(
-        self, task: str, file_contents: Dict[str, str]
-    ) -> List[Dict]:
-        """使用 AI 生成修复方案"""
-        if not self.claude:
-            return []
-
-        # 构建上下文
-        context = "\n\n".join([
-            f"### {fpath}\n```\n{content[:3000]}\n```"
-            for fpath, content in file_contents.items()
-        ])
-
-        system = """你是一个代码修复专家。根据任务描述和现有代码，输出具体的修改方案。
-只输出JSON数组，每个元素格式:
-{"file": "相对路径", "type": "replace|append", "old": "要替换的文本(仅replace)", "new": "新文本(仅replace)", "content": "要追加的文本(仅append)", "description": "修改说明"}"""
-
-        user = f"""任务: {task}
-
-现有代码:
-{context}
-
-请输出修改方案JSON数组。"""
-
-        result = self.claude.api_client.chat(
-            system, [{"role": "user", "content": user}], max_tokens=2048
-        )
-
-        if result["success"]:
-            try:
-                content = result["content"]
-                if "```json" in content:
-                    content = content.split("```json")[1].split("```")[0]
-                elif "```" in content:
-                    content = content.split("```")[1].split("```")[0]
-                return json.loads(content.strip())
-            except (json.JSONDecodeError, IndexError):
-                pass
-        return []
-
-    def _verify_simple_changes(self, files_modified: List[str]) -> Dict:
-        """验证简单修改"""
-        if not files_modified:
-            return {"success": True, "message": "无文件修改，无需验证"}
-
-        # 检查修改后的文件是否可读
-        for fpath in files_modified:
-            full_path = self.project_dir / fpath
-            if not full_path.exists():
-                return {"success": False, "message": f"文件不存在: {fpath}"}
-
-        # 对 Python 文件做语法检查
-        py_files = [f for f in files_modified if f.endswith('.py')]
-        for fpath in py_files:
-            full_path = self.project_dir / fpath
-            try:
-                compile(full_path.read_text(encoding='utf-8'), fpath, 'exec')
-            except SyntaxError as e:
-                return {"success": False, "message": f"语法错误 {fpath}: {e}"}
-
-        return {"success": True, "message": f"{len(files_modified)} 个文件修改验证通过"}
 
     # ================================================================
     # 复杂任务执行路径（多层嵌套Loop）
@@ -550,120 +191,92 @@ class Orchestrator:
         print_info(f"规划阶段完成，生成 {len(self.subtasks)} 个原子子任务")
 
     def _generate_initial_plan(self, task: str) -> Dict:
-        """生成初始方案"""
-        # 根据任务类型生成不同的方案
-        if "用户管理" in task or "user" in task.lower():
-            plan = {
-                "architecture": "前后端分离 + RESTful API + 关系型数据库",
-                "modules": ["数据库设计", "后端API", "前端页面", "工程规范"],
-                "tech_stack": {
-                    "backend": "Python FastAPI",
-                    "frontend": "React + TypeScript",
-                    "database": "SQLite",
-                    "testing": "pytest + jest"
-                }
-            }
-            self.subtasks = [
-                SubTask(
-                    id="SUB-001", name="数据库表结构设计",
-                    description="设计用户表、角色表、权限表，含索引优化和字段约束",
-                    workspace="db-schema-design", module_type="database",
-                    priority=0, completion_criteria="DDL语句完整、索引合理、字段约束正确"
-                ),
-                SubTask(
-                    id="SUB-002", name="后端CRUD接口开发",
-                    description="用户管理CRUD接口、参数校验、异常处理、事务管理",
-                    workspace="backend-user-module", module_type="backend",
-                    priority=1, dependencies=["SUB-001"],
-                    completion_criteria="接口完整、单测通过、无编译错误"
-                ),
-                SubTask(
-                    id="SUB-003", name="前端用户管理页面",
-                    description="用户列表、新增编辑弹窗、表单校验、接口对接",
-                    workspace="frontend-user-page", module_type="frontend",
-                    priority=1, dependencies=["SUB-002"],
-                    completion_criteria="页面渲染正常、tsc编译无报错"
-                ),
-                SubTask(
-                    id="SUB-004", name="工程规范统一整改",
-                    description="代码格式化、lint修复、重复代码抽离、全局规范",
-                    workspace="project-lint-fix", module_type="config",
-                    priority=2, completion_criteria="lint零告警、代码规范统一"
-                ),
-            ]
-        elif "重构" in task or "refactor" in task.lower():
-            plan = {
-                "architecture": "模块化重构 + 依赖解耦 + 代码规范化",
-                "modules": ["代码分析", "模块拆分", "依赖整理", "测试覆盖"],
-                "tech_stack": {"language": "Python/TypeScript", "testing": "pytest/jest"}
-            }
-            self.subtasks = [
-                SubTask(
-                    id="SUB-001", name="代码结构分析", description="分析现有代码结构、依赖关系",
-                    workspace="code-analysis", module_type="config", priority=0
-                ),
-                SubTask(
-                    id="SUB-002", name="模块拆分重构", description="按职责拆分模块、降低耦合",
-                    workspace="module-refactor", module_type="backend", priority=1
-                ),
-                SubTask(
-                    id="SUB-003", name="公共代码抽离", description="抽离重复代码到公共模块",
-                    workspace="common-extract", module_type="config", priority=1
-                ),
-                SubTask(
-                    id="SUB-004", name="测试覆盖补充", description="补充单元测试、集成测试",
-                    workspace="test-coverage", module_type="backend", priority=2
-                ),
-            ]
-        else:
-            # 通用方案
-            plan = {
-                "architecture": "模块化分布式架构",
-                "modules": ["需求分析", "模块开发", "集成测试", "优化部署"],
-                "tech_stack": {"language": "通用", "testing": "标准测试框架"}
-            }
-            self.subtasks = [
-                SubTask(
-                    id="SUB-001", name="需求分析与架构设计",
-                    description="分析需求、设计架构方案",
-                    workspace="requirement-analysis", module_type="config", priority=0
-                ),
-                SubTask(
-                    id="SUB-002", name="核心模块开发",
-                    description="开发核心业务模块",
-                    workspace="core-module", module_type="backend", priority=1
-                ),
-                SubTask(
-                    id="SUB-003", name="接口/页面开发",
-                    description="开发接口或前端页面",
-                    workspace="interface-module", module_type="frontend", priority=1
-                ),
-                SubTask(
-                    id="SUB-004", name="集成测试与优化",
-                    description="全局集成测试、性能优化",
-                    workspace="integration-test", module_type="config", priority=2
-                ),
-            ]
+        """通过 Claude API 生成初始方案"""
+        try:
+            client = create_llm_client()
+            response = client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=8192,
+                system=ORCHESTRATOR_PLANNING_PROMPT,
+                messages=[{"role": "user", "content": f"请为以下任务生成实施方案:\n\n{task}"}]
+            )
+            raw = response.content[0].text
 
-        return plan
+            # 提取 JSON（处理可能的 markdown 代码块）
+            if "```json" in raw:
+                raw = raw.split("```json")[1].split("```")[0]
+            elif "```" in raw:
+                raw = raw.split("```")[1].split("```")[0]
+
+            plan = json.loads(raw.strip())
+
+            # 从 plan 中提取 subtasks 并创建 SubTask 对象
+            subtask_dicts = plan.pop("subtasks", [])
+            self.subtasks = []
+            for st in subtask_dicts:
+                self.subtasks.append(SubTask(
+                    id=st.get("id", f"SUB-{len(self.subtasks)+1:03d}"),
+                    name=st.get("name", "未命名"),
+                    description=st.get("description", ""),
+                    workspace=st.get("workspace", st.get("id", "unknown").lower().replace(" ", "-")),
+                    module_type=st.get("module_type", "backend"),
+                    dependencies=st.get("dependencies", []),
+                    completion_criteria=st.get("completion_criteria", ""),
+                    priority=st.get("priority", len(self.subtasks)),
+                ))
+
+            return plan
+
+        except Exception as e:
+            print_warning(f"Claude API 规划失败: {e}，使用通用方案")
+            return self._fallback_plan(task)
 
     def _refine_plan(self, plan: Dict) -> Dict:
-        """优化方案（使用AI或模拟迭代改进）"""
-        # 尝试使用 AI 优化方案
-        if self.claude and self.claude.is_real():
-            result = self.claude.refine_plan(
-                plan,
-                task_description=str(self.plan.get("architecture", "")),
-                feedback=f"当前迭代第{self.state.iteration}轮，请优化方案"
+        """优化方案（通过 Claude API 迭代改进）"""
+        try:
+            client = create_llm_client()
+            response = client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=8192,
+                system=ORCHESTRATOR_PLANNING_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": f"优化以下方案，减少耦合、提高可执行性:\n\n{json.dumps(plan, ensure_ascii=False, indent=2)}"
+                }]
             )
-            if result.get("success") and result.get("plan"):
-                print_info("AI 优化方案完成")
-                return result["plan"]
+            raw = response.content[0].text
+            if "```json" in raw:
+                raw = raw.split("```json")[1].split("```")[0]
+            elif "```" in raw:
+                raw = raw.split("```")[1].split("```")[0]
+            refined = json.loads(raw.strip())
+            refined["version"] = plan.get("version", 1) + 1
+            return refined
+        except Exception as e:
+            print_warning(f"方案优化失败: {e}")
+            plan["version"] = plan.get("version", 1) + 1
+            return plan
 
-        # 降级：模拟优化
-        plan["version"] = plan.get("version", 1) + 1
-        plan["optimizations"] = plan.get("optimizations", []) + [
-            f"优化项v{plan['version']}: 减少模块耦合、增加容错设计"
+    def _fallback_plan(self, task: str) -> Dict:
+        """API 不可用时的通用兜底方案"""
+        plan = {
+            "architecture": "模块化分布式架构",
+            "modules": ["需求分析", "模块开发", "集成测试", "优化部署"],
+            "tech_stack": {"language": "通用", "testing": "标准测试框架"}
+        }
+        self.subtasks = [
+            SubTask(id="SUB-001", name="需求分析与架构设计",
+                    description="分析需求、设计架构方案",
+                    workspace="requirement-analysis", module_type="config", priority=0),
+            SubTask(id="SUB-002", name="核心模块开发",
+                    description="开发核心业务模块",
+                    workspace="core-module", module_type="backend", priority=1),
+            SubTask(id="SUB-003", name="接口/页面开发",
+                    description="开发接口或前端页面",
+                    workspace="interface-module", module_type="frontend", priority=1),
+            SubTask(id="SUB-004", name="集成测试与优化",
+                    description="全局集成测试、性能优化",
+                    workspace="integration-test", module_type="config", priority=2),
         ]
         return plan
 
@@ -766,8 +379,8 @@ class Orchestrator:
             "workspace": str(workspace)
         }
 
-        # 调用子Agent进程
-        result = run_child_agent(str(workspace), task_payload)
+        # 调用子Agent进程，传入项目目录以便读取上下文
+        result = run_child_agent(str(workspace), task_payload, str(self.project_dir))
         return result
 
     # ================================================================
@@ -777,170 +390,40 @@ class Orchestrator:
         print_phase("阶段三：结果回流汇总Loop")
         self.state.phase = "merge"
 
-        print_step("收集所有子Agent输出...")
         completed = [r for r in self.all_results if r["status"] == "completed"]
         failed = [r for r in self.all_results if r["status"] == "failed"]
-
         print_info(f"已完成: {len(completed)} | 失败: {len(failed)}")
 
-        # 实际合并子Agent工作区文件到项目目录
-        print_step("合并模块代码到项目目录...")
+        if not completed:
+            print_warning("没有成功完成的子任务，跳过合并")
+            return
+
+        # 将各工作区的文件复制到项目目录
         merged_count = 0
-        conflict_count = 0
-
-        for result in self.all_results:
-            if result["status"] != "completed":
-                continue
-            subtask_result = result.get("result", {})
-            if not subtask_result:
+        for r in completed:
+            ws_path = Path(r.get("result", {}).get("workspace", ""))
+            if not ws_path or not ws_path.exists():
                 continue
 
-            workspace_path = subtask_result.get("workspace", "")
-            if workspace_path and Path(workspace_path).exists():
-                # 将子Agent工作区文件复制到项目目录
-                module_type = None
-                for st in self.subtasks:
-                    if st.id == result["subtask_id"]:
-                        module_type = st.module_type
-                        break
+            for file_path in ws_path.rglob("*"):
+                if file_path.is_file() and not file_path.name.startswith("."):
+                    # 计算相对路径，保留目录结构
+                    rel_path = file_path.relative_to(ws_path)
+                    dest = self.project_dir / rel_path
+                    dest.parent.mkdir(parents=True, exist_ok=True)
 
-                target_dir = self._get_target_dir(module_type)
-                files_copied = self._merge_workspace_to_project(
-                    Path(workspace_path), target_dir
-                )
-                merged_count += files_copied
+                    if dest.exists():
+                        print_warning(f"冲突: {rel_path} 已存在，备份后覆盖")
+                        backup = dest.with_suffix(dest.suffix + ".bak")
+                        shutil.copy2(dest, backup)
 
-        print_success(f"代码合并完成: {merged_count} 个文件已合并到项目目录")
+                    shutil.copy2(file_path, dest)
+                    merged_count += 1
+                    print_success(f"合并: {rel_path}")
 
-        # 检测冲突
-        print_step("检测文件冲突...")
-        conflicts = self._detect_conflicts()
-        if conflicts:
-            for conflict in conflicts:
-                print_warning(f"冲突: {conflict}")
-                conflict_count += 1
-        else:
-            print_success("无文件冲突")
-
-        print_step("解决逻辑冲突...")
-        if conflict_count > 0:
-            print_step("自动解决简单冲突...")
-            print_success(f"已解决 {conflict_count} 个冲突")
-        else:
-            print_success("无逻辑冲突")
-
-        print_step("执行全局工程校验...")
-        checks = self._run_global_checks()
-        all_pass = True
-        for check in checks:
-            if check["status"] == "pass":
-                print_success(f"{check['name']}: PASS")
-            else:
-                print_error(f"{check['name']}: FAIL - {check.get('message', '')}")
-                all_pass = False
-
-        if not all_pass:
-            print_warning("部分校验未通过，将在阶段四修复")
+        print_info(f"共合并 {merged_count} 个文件到 {self.project_dir}")
 
         self.timer.checkpoint("phase3_merge")
-
-    def _get_target_dir(self, module_type: str) -> Path:
-        """根据模块类型获取目标目录"""
-        mapping = {
-            "database": self.project_dir / "database",
-            "backend": self.project_dir / "backend",
-            "frontend": self.project_dir / "frontend",
-            "config": self.project_dir,
-        }
-        target = mapping.get(module_type, self.project_dir / "modules")
-        target.mkdir(parents=True, exist_ok=True)
-        return target
-
-    def _merge_workspace_to_project(self, workspace: Path, target_dir: Path) -> int:
-        """将工作区文件合并到项目目录"""
-        count = 0
-        if not workspace.exists():
-            return count
-
-        # 跳过目录类型标记文件
-        skip_files = {".gitkeep", "__pycache__", ".DS_Store"}
-
-        for file_path in workspace.rglob("*"):
-            if file_path.is_file() and file_path.name not in skip_files:
-                # 计算相对路径
-                rel_path = file_path.relative_to(workspace)
-                target_path = target_dir / rel_path
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-
-                try:
-                    content = file_path.read_text(encoding='utf-8')
-                    target_path.write_text(content, encoding='utf-8')
-                    count += 1
-                except Exception as e:
-                    print_warning(f"合并文件失败 {rel_path}: {e}")
-
-        return count
-
-    def _detect_conflicts(self) -> List[str]:
-        """检测文件冲突"""
-        conflicts = []
-        # 检查是否有重复文件被多个子Agent修改
-        seen_files = {}
-        for result in self.all_results:
-            if result["status"] != "completed":
-                continue
-            subtask_result = result.get("result", {})
-            files = subtask_result.get("files_created", [])
-            for f in files:
-                if f in seen_files:
-                    conflicts.append(
-                        f"文件 '{f}' 被 [{seen_files[f]}] 和 [{result['subtask_id']}] 同时修改"
-                    )
-                else:
-                    seen_files[f] = result["subtask_id"]
-        return conflicts
-
-    def _run_global_checks(self) -> List[Dict]:
-        """执行全局工程校验"""
-        checks = []
-
-        # 检查项目目录是否存在
-        if self.project_dir.exists():
-            checks.append({"name": "项目目录完整性", "status": "pass"})
-        else:
-            checks.append({"name": "项目目录完整性", "status": "fail", "message": "项目目录不存在"})
-
-        # 检查是否有代码文件生成
-        all_files = list(self.project_dir.rglob("*.py")) + \
-                    list(self.project_dir.rglob("*.tsx")) + \
-                    list(self.project_dir.rglob("*.ts")) + \
-                    list(self.project_dir.rglob("*.sql"))
-        if all_files:
-            checks.append({"name": "代码文件生成", "status": "pass"})
-        else:
-            checks.append({"name": "代码文件生成", "status": "fail", "message": "未生成任何代码文件"})
-
-        # 尝试运行 Python 语法检查
-        py_files = list(self.project_dir.rglob("*.py"))
-        if py_files:
-            try:
-                import py_compile
-                syntax_ok = True
-                for f in py_files[:20]:  # 限制检查数量
-                    try:
-                        py_compile.compile(str(f), doraise=True)
-                    except py_compile.PyCompileError:
-                        syntax_ok = False
-                        break
-                if syntax_ok:
-                    checks.append({"name": "Python语法检查", "status": "pass"})
-                else:
-                    checks.append({"name": "Python语法检查", "status": "fail", "message": "存在语法错误"})
-            except Exception:
-                checks.append({"name": "Python语法检查", "status": "pass"})
-
-        checks.append({"name": "全局兼容性检测", "status": "pass"})
-        return checks
 
     # ================================================================
     # 阶段四：全局自检修复闭环Loop
@@ -961,56 +444,68 @@ class Orchestrator:
             print_warning(f"检测到 {len(issues)} 个问题，开始修复...")
 
             for issue in issues:
-                if issue["type"] == "architecture":
-                    print_step(f"修复架构问题: {issue['description']}")
-                    print_success(f"已修复: {issue['description']}")
-                elif issue["type"] == "module":
-                    print_step(f"重新调度子Agent修复: {issue['description']}")
-                    print_success(f"已修复: {issue['description']}")
+                print_step(f"修复: {issue['description']}")
+                # 使用 Claude API 修复全局问题
+                try:
+                    fix_result = run_agent_loop(
+                        task_description=f"修复以下全局问题:\n{issue['description']}\n\n文件路径: {issue.get('file', '')}\n问题详情: {issue.get('detail', '')}",
+                        workspace=str(self.project_dir),
+                        system_prompt=ORCHESTRATOR_EXECUTION_PROMPT,
+                        project_dir=str(self.project_dir),
+                        max_iterations=5
+                    )
+                    if fix_result["success"]:
+                        print_success(f"已修复: {issue['description']}")
+                    else:
+                        print_error(f"修复失败: {issue['description']}")
+                except Exception as e:
+                    print_error(f"修复异常: {e}")
 
-            # 判断是否还有问题
             if iteration == MAX_GLOBAL_FIX_ITERATIONS:
                 print_warning("达到最大修复迭代次数")
 
         self.timer.checkpoint("phase4_validate")
 
     def _detect_global_issues(self) -> List[Dict]:
-        """检测全局问题"""
-        self._global_issue_round += 1
-        issues = []
+        """通过 Claude API 检测全局问题"""
+        try:
+            client = create_llm_client()
 
-        # 第一轮：检测常见问题
-        if self._global_issue_round == 1:
-            # 检查是否有失败的子任务
-            if self.state.failed_subtasks > 0:
-                issues.append({
-                    "type": "module",
-                    "description": f"{self.state.failed_subtasks} 个子任务失败，需要重新调度"
-                })
+            # 收集项目中所有代码文件的内容摘要
+            code_files = []
+            for ext in ['*.py', '*.ts', '*.tsx', '*.js', '*.jsx', '*.sql', '*.json']:
+                for f in self.project_dir.rglob(ext):
+                    if 'node_modules' not in str(f) and '__pycache__' not in str(f):
+                        try:
+                            content = f.read_text(encoding='utf-8', errors='replace')
+                            code_files.append(f"### {f.relative_to(self.project_dir)}\n{content[:2000]}")
+                        except:
+                            pass
 
-            # 检查架构一致性
-            if self.plan:
-                modules = self.plan.get("modules", [])
-                completed_modules = {
-                    r["subtask_name"] for r in self.all_results
-                    if r["status"] == "completed"
-                }
-                for module in modules:
-                    if module not in str(completed_modules):
-                        issues.append({
-                            "type": "architecture",
-                            "description": f"模块 '{module}' 可能未完整实现"
-                        })
+            if not code_files:
+                return []
 
-            # 检查文件冲突（实际环境会检查真实文件）
-            completed_count = sum(1 for r in self.all_results if r["status"] == "completed")
-            if completed_count > 1:
-                issues.append({
-                    "type": "architecture",
-                    "description": "检查多模块间的API路径一致性和接口兼容性"
-                })
+            code_snapshot = "\n\n".join(code_files[:20])  # 限制上下文大小
 
-        return issues
+            response = client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=4096,
+                system="你是一个代码审查专家。检测项目中的全局性问题：模块间API不一致、缺失的导入、循环依赖、配置冲突等。返回 JSON 数组: [{\"type\": \"architecture|module|config\", \"description\": \"问题描述\", \"file\": \"文件路径\", \"detail\": \"详细信息\"}]。如果没有问题返回空数组 []。",
+                messages=[{"role": "user", "content": f"审查以下项目代码，检测全局问题:\n\n{code_snapshot}"}]
+            )
+
+            raw = response.content[0].text
+            if "```json" in raw:
+                raw = raw.split("```json")[1].split("```")[0]
+            elif "```" in raw:
+                raw = raw.split("```")[1].split("```")[0]
+
+            issues = json.loads(raw.strip())
+            return issues if isinstance(issues, list) else []
+
+        except Exception as e:
+            print_warning(f"全局检测异常: {e}")
+            return []
 
 
 # ============================================================
