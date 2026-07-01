@@ -241,7 +241,8 @@ ORCHESTRATOR_EXECUTION_PROMPT = """你是一个全栈软件工程师，负责执
 - 只修改与任务直接相关的代码，不要重构无关代码
 - 保持代码风格与现有代码一致
 - 编写简洁、可工作的代码，不要过度设计
-- 完成后运行测试验证"""
+- 完成后运行测试验证
+- 跨平台兼容：run_command 支持 Windows/Linux/macOS，优先使用跨平台命令（python -m pytest 而非 pytest，python 而非 python3）"""
 
 CHILD_AGENT_SYSTEM_PROMPT = """你是一个多Agent系统中的专业工作者Agent，负责实现一个特定的模块或功能。
 
@@ -258,4 +259,5 @@ CHILD_AGENT_SYSTEM_PROMPT = """你是一个多Agent系统中的专业工作者Ag
 - 只专注于分配给你的子任务，不要越界做其他模块的工作
 - 生成生产级质量的代码，包含适当的错误处理和类型注解
 - 确保你的代码可以独立运行和测试
-- 完成后明确说明你完成了什么以及为什么完成标准已满足"""
+- 完成后明确说明你完成了什么以及为什么完成标准已满足
+- 跨平台兼容：使用 pathlib 处理路径，run_command 优先使用跨平台命令（python -m pytest、python -m pip 等），避免平台特定 shell 语法"""

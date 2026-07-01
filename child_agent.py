@@ -110,9 +110,10 @@ class ChildAgent:
         details = []
 
         # 查找测试文件
-        test_files = list(self.workspace.glob("test_*.py")) + \
-                      list(self.workspace.glob("*_test.py")) + \
-                      list(self.workspace.glob("*.test.*"))
+        test_patterns = ("test_*.py", "Test_*.py", "*_test.py", "*_Test.py", "*.test.*", "*.Test.*")
+        test_files = []
+        for pattern in test_patterns:
+            test_files.extend(self.workspace.glob(pattern))
 
         if not test_files:
             print(f"  {Colors.DIM}未找到测试文件，跳过测试{Colors.END}")
@@ -147,8 +148,7 @@ class ChildAgent:
             try:
                 result = subprocess.run(
                     ["npm", "test"], capture_output=True, text=True, timeout=120,
-                    cwd=str(self.workspace), encoding='utf-8', errors='replace',
-                    shell=True
+                    cwd=str(self.workspace), encoding='utf-8', errors='replace'
                 )
                 output = result.stdout + result.stderr
                 details.append(f"npm test:\n{output}")

@@ -471,10 +471,11 @@ class Orchestrator:
         try:
             client = create_llm_client()
 
-            # 收集项目中所有代码文件的内容摘要
+            # 收集项目中所有代码文件的内容摘要（跨平台大小写不敏感）
             code_files = []
-            for ext in ['*.py', '*.ts', '*.tsx', '*.js', '*.jsx', '*.sql', '*.json']:
-                for f in self.project_dir.rglob(ext):
+            code_exts = {'.py', '.ts', '.tsx', '.js', '.jsx', '.sql', '.json'}
+            for f in self.project_dir.rglob("*"):
+                if f.suffix.lower() in code_exts:
                     if 'node_modules' not in str(f) and '__pycache__' not in str(f):
                         try:
                             content = f.read_text(encoding='utf-8', errors='replace')

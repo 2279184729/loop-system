@@ -9,6 +9,7 @@ import subprocess
 import sys
 import os
 import shutil
+import shlex
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -17,6 +18,78 @@ from config import (
     LOGS_DIR, WORKSPACES_DIR, ANTHROPIC_API_KEY, ANTHROPIC_MODEL,
     ANTHROPIC_BASE_URL, TOOL_DEFINITIONS
 )
+
+# ============================================================
+# 跨平台兼容层
+# ============================================================
+_IS_WINDOWS = sys.platform == "win32"
+
+# 常见 Unix → Windows 命令映射
+_UNIX_TO_WIN_CMD = {
+    "ls": "dir",
+    "cat": "type",
+    "cp": "copy",
+    "mv": "move",
+    "rm": "del",
+    "rmdir": "rmdir",
+    "grep": "findstr",
+    "which": "where",
+    "touch": "echo. >",  # 近似
+    "clear": "cls",
+    "pwd": "cd",
+}
+
+# Windows 上可用的 Unix shell 优先级
+_UNIX_SHELLS = ["bash", "wsl", "zsh", "sh"]
+
+
+def _find_unix_shell() -> Optional[str]:
+    """在 Windows 上查找可用的 Unix shell（Git Bash / WSL / MSYS2）"""
+    if not _IS_WINDOWS:
+        return None
+    for shell in _UNIX_SHELLS:
+        if shutil.which(shell):
+            return shell
+    return None
+
+
+def _get_shell() -> Optional[str]:
+    """返回当前平台可用的最佳 shell，None 表示使用系统默认"""
+    if not _IS_WINDOWS:
+        return None  # Linux/macOS 直接用默认 shell
+    return _find_unix_shell()
+
+
+def _translate_command(command: str) -> str:
+    """将常见 Unix 命令翻译为 Windows 等效命令"""
+    if not _IS_WINDOWS:
+        return command
+
+    shell = _find_unix_shell()
+    if shell:
+        # 有 Unix shell 可用，直接透传
+        return command
+
+    # 没有 Unix shell，翻译常见命令
+    parts = command.strip().split(maxsplit=1)
+    base_cmd = parts[0]
+    args = parts[1] if len(parts) > 1 else ""
+
+    if base_cmd in _UNIX_TO_WIN_CMD:
+        win_cmd = _UNIX_TO_WIN_CMD[base_cmd]
+        if base_cmd == "rm" and args.startswith("-rf "):
+            return f"rmdir /s /q {args[4:]}"
+        elif base_cmd == "rm" and args.startswith("-r "):
+            return f"rmdir /s /q {args[3:]}"
+        elif base_cmd == "rm":
+            return f"del /q {args}"
+        elif base_cmd == "touch":
+            return f"type nul > {args}"
+        elif base_cmd == "grep":
+            return f"findstr {args}"
+        return f"{win_cmd} {args}".strip()
+
+    return command
 
 # ============================================================
 # 终端输出工具
@@ -331,9 +404,12 @@ def _execute_single_tool(tool_name: str, tool_input: dict, workspace: str,
 
         elif tool_name == "run_command":
             command = tool_input.get("command", "")
+            command = _translate_command(command)
+            shell = _get_shell()
             result = subprocess.run(
                 command, shell=True, capture_output=True, text=True,
-                timeout=120, cwd=str(ws), encoding='utf-8', errors='replace'
+                timeout=120, cwd=str(ws), encoding='utf-8', errors='replace',
+                executable=shell
             )
             output = result.stdout
             if result.stderr:

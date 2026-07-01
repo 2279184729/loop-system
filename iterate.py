@@ -297,8 +297,10 @@ class IterationLoop:
         print_step(f"🧪 测试: {feature.name}")
 
         # 运行项目测试
-        test_files = list(self.project_dir.rglob("test_*.py")) + \
-                     list(self.project_dir.rglob("*_test.py"))
+        test_patterns = ("test_*.py", "Test_*.py", "*_test.py", "*_Test.py")
+        test_files = []
+        for pattern in test_patterns:
+            test_files.extend(self.project_dir.rglob(pattern))
 
         if test_files:
             try:
@@ -354,7 +356,7 @@ class IterationLoop:
 
         # 检查代码质量
         if self.ctx:
-            py_files = [f for f in feature.files_changed if f.endswith('.py')]
+            py_files = [f for f in feature.files_changed if f.lower().endswith('.py')]
             for f in py_files:
                 full_path = self.project_dir / f
                 if full_path.exists():
