@@ -9,33 +9,31 @@ Claude Code 父子多层嵌套自适应Loop系统 - 父调度Agent核心引擎
   5. 全局自检修复闭环
 """
 
+import io
 import json
 import sys
-import os
-import io
 
 # 修复Windows GBK编码问题
 if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
 
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import (
     Colors, SubTask, LoopState,
-    MAX_PLAN_ITERATIONS, MAX_CHILD_ITERATIONS,
+    MAX_PLAN_ITERATIONS,
     MAX_GLOBAL_FIX_ITERATIONS,
-    ORCHESTRATOR_PLANNING_PROMPT, ORCHESTRATOR_EXECUTION_PROMPT,
-    ANTHROPIC_MODEL
+    ORCHESTRATOR_PLANNING_PROMPT, ORCHESTRATOR_EXECUTION_PROMPT
 )
 from utils import (
     print_banner, print_phase, print_step, print_success,
     print_error, print_warning, print_info, print_subtask,
-    analyze_complexity, Logger, Timer, setup_workspace, run_child_agent,
-    create_llm_client, run_agent_loop
+    Logger, Timer, setup_workspace, run_child_agent,
+    run_claude_cli, parse_json_from_output
 )
 
 
@@ -52,74 +50,19 @@ class Orchestrator:
         self.subtasks: List[SubTask] = []
         self.plan: Optional[Dict] = None
         self.all_results: List[Dict] = []
+        self.files_modified: List[str] = []
 
     def execute(self, task_description: str) -> Dict:
         """
-        主入口：执行任务（自适应路由）
+        主入口：执行任务（全部走复杂任务多层嵌套Loop模式）
         """
         print_banner("Claude Code 父子多层嵌套自适应Loop系统", Colors.CYAN)
         print(f"\n{Colors.BOLD}📋 任务描述:{Colors.END}")
         print(f"  {Colors.DIM}{task_description}{Colors.END}")
 
-        # ==========================================
-        # 阶段0：复杂度判定
-        # ==========================================
-        self.state.phase = "complexity_check"
-        print_phase("阶段0：自适应复杂度判定")
+        self.timer.checkpoint("start")
+        return self._execute_complex(task_description)
 
-        complexity = analyze_complexity(task_description)
-        print_step(f"简单得分: {complexity['simple_score']} | 复杂得分: {complexity['complex_score']}")
-        print_step(f"判定置信度: {complexity['confidence']*100:.0f}%")
-        print_step(f"建议模式: {'🔀 多Agent分层调度' if complexity['is_complex'] else '⚡ 直接执行'}")
-
-        if complexity['complex_matches']:
-            print_info(f"复杂特征匹配: {', '.join(complexity['complex_matches'])}")
-        if complexity['simple_matches']:
-            print_info(f"简单特征匹配: {', '.join(complexity['simple_matches'])}")
-
-        self.timer.checkpoint("complexity_check")
-
-        # ==========================================
-        # 路由：简单任务 vs 复杂任务
-        # ==========================================
-        if not complexity['is_complex']:
-            return self._execute_simple(task_description)
-        else:
-            return self._execute_complex(task_description)
-
-    # ================================================================
-    # 简单任务执行路径（直接调用 Claude API + Tool Use）
-    # ================================================================
-    def _execute_simple(self, task_description: str) -> Dict:
-        print_banner("⚡ 简单任务模式：直接执行", Colors.GREEN)
-        self.state.phase = "direct_execute"
-
-        workspace = str(self.project_dir)
-        result = run_agent_loop(
-            task_description=task_description,
-            workspace=workspace,
-            system_prompt=ORCHESTRATOR_EXECUTION_PROMPT,
-            project_dir=workspace,
-            max_iterations=10
-        )
-
-        self.state.phase = "done"
-        elapsed = self.timer.elapsed()
-
-        return {
-            "mode": "simple",
-            "task": task_description,
-            "result": result.get("result", ""),
-            "iterations": result.get("iterations", 0),
-            "files_created": result.get("files_created", []),
-            "elapsed_seconds": round(elapsed, 2),
-            "child_agents_used": 0,
-            "status": "completed" if result["success"] else "partial"
-        }
-
-    # ================================================================
-    # 复杂任务执行路径（多层嵌套Loop）
-    # ================================================================
     def _execute_complex(self, task_description: str) -> Dict:
         print_banner("🔀 复杂任务模式：多层嵌套Loop调度", Colors.BLUE)
 
@@ -149,6 +92,7 @@ class Orchestrator:
             "iterations": self.state.iteration,
             "elapsed_seconds": round(elapsed, 2),
             "child_agents_used": len(self.subtasks),
+            "files_modified": self.files_modified,
             "status": "completed" if self.state.failed_subtasks == 0 else "partial"
         }
 
@@ -191,71 +135,57 @@ class Orchestrator:
         print_info(f"规划阶段完成，生成 {len(self.subtasks)} 个原子子任务")
 
     def _generate_initial_plan(self, task: str) -> Dict:
-        """通过 Claude API 生成初始方案"""
-        try:
-            client = create_llm_client()
-            response = client.messages.create(
-                model=ANTHROPIC_MODEL,
-                max_tokens=8192,
-                system=ORCHESTRATOR_PLANNING_PROMPT,
-                messages=[{"role": "user", "content": f"请为以下任务生成实施方案:\n\n{task}"}]
-            )
-            raw = response.content[0].text
+        """通过 claude CLI 生成初始方案"""
+        prompt = f"""{ORCHESTRATOR_PLANNING_PROMPT}
 
-            # 提取 JSON（处理可能的 markdown 代码块）
-            if "```json" in raw:
-                raw = raw.split("```json")[1].split("```")[0]
-            elif "```" in raw:
-                raw = raw.split("```")[1].split("```")[0]
+请为以下任务生成实施方案:
 
-            plan = json.loads(raw.strip())
+{task}"""
 
-            # 从 plan 中提取 subtasks 并创建 SubTask 对象
-            subtask_dicts = plan.pop("subtasks", [])
-            self.subtasks = []
-            for st in subtask_dicts:
-                self.subtasks.append(SubTask(
-                    id=st.get("id", f"SUB-{len(self.subtasks)+1:03d}"),
-                    name=st.get("name", "未命名"),
-                    description=st.get("description", ""),
-                    workspace=st.get("workspace", st.get("id", "unknown").lower().replace(" ", "-")),
-                    module_type=st.get("module_type", "backend"),
-                    dependencies=st.get("dependencies", []),
-                    completion_criteria=st.get("completion_criteria", ""),
-                    priority=st.get("priority", len(self.subtasks)),
-                ))
-
-            return plan
-
-        except Exception as e:
-            print_warning(f"Claude API 规划失败: {e}，使用通用方案")
+        result = run_claude_cli(prompt, str(self.project_dir))
+        if not result["success"]:
+            print_warning(f"Claude CLI 规划失败: {result.get('error', 'Unknown')}，使用通用方案")
             return self._fallback_plan(task)
 
+        plan = parse_json_from_output(result["output"])
+        if plan is None:
+            print_warning("无法解析规划 JSON，使用通用方案")
+            return self._fallback_plan(task)
+
+        # 从 plan 中提取 subtasks 并创建 SubTask 对象
+        subtask_dicts = plan.pop("subtasks", [])
+        self.subtasks = []
+        for st in subtask_dicts:
+            self.subtasks.append(SubTask(
+                id=st.get("id", f"SUB-{len(self.subtasks) + 1:03d}"),
+                name=st.get("name", "未命名"),
+                description=st.get("description", ""),
+                workspace=st.get("workspace", st.get("id", "unknown").lower().replace(" ", "-")),
+                module_type=st.get("module_type", "backend"),
+                dependencies=st.get("dependencies", []),
+                completion_criteria=st.get("completion_criteria", ""),
+                priority=st.get("priority", len(self.subtasks)),
+            ))
+
+        return plan
+
     def _refine_plan(self, plan: Dict) -> Dict:
-        """优化方案（通过 Claude API 迭代改进）"""
-        try:
-            client = create_llm_client()
-            response = client.messages.create(
-                model=ANTHROPIC_MODEL,
-                max_tokens=8192,
-                system=ORCHESTRATOR_PLANNING_PROMPT,
-                messages=[{
-                    "role": "user",
-                    "content": f"优化以下方案，减少耦合、提高可执行性:\n\n{json.dumps(plan, ensure_ascii=False, indent=2)}"
-                }]
-            )
-            raw = response.content[0].text
-            if "```json" in raw:
-                raw = raw.split("```json")[1].split("```")[0]
-            elif "```" in raw:
-                raw = raw.split("```")[1].split("```")[0]
-            refined = json.loads(raw.strip())
-            refined["version"] = plan.get("version", 1) + 1
-            return refined
-        except Exception as e:
-            print_warning(f"方案优化失败: {e}")
-            plan["version"] = plan.get("version", 1) + 1
-            return plan
+        """优化方案（通过 claude CLI 迭代改进）"""
+        prompt = f"""{ORCHESTRATOR_PLANNING_PROMPT}
+
+优化以下方案，减少耦合、提高可执行性:
+
+{json.dumps(plan, ensure_ascii=False, indent=2)}"""
+
+        result = run_claude_cli(prompt, str(self.project_dir))
+        if result["success"]:
+            refined = parse_json_from_output(result["output"])
+            if refined:
+                refined["version"] = plan.get("version", 1) + 1
+                return refined
+        print_warning("方案优化失败，保持当前版本")
+        plan["version"] = plan.get("version", 1) + 1
+        return plan
 
     def _fallback_plan(self, task: str) -> Dict:
         """API 不可用时的通用兜底方案"""
@@ -398,8 +328,10 @@ class Orchestrator:
             print_warning("没有成功完成的子任务，跳过合并")
             return
 
-        # 将各工作区的文件复制到项目目录
         merged_count = 0
+        conflict_count = 0
+        validation_errors = []
+
         for r in completed:
             ws_path = Path(r.get("result", {}).get("workspace", ""))
             if not ws_path or not ws_path.exists():
@@ -407,21 +339,62 @@ class Orchestrator:
 
             for file_path in ws_path.rglob("*"):
                 if file_path.is_file() and not file_path.name.startswith("."):
-                    # 计算相对路径，保留目录结构
                     rel_path = file_path.relative_to(ws_path)
                     dest = self.project_dir / rel_path
                     dest.parent.mkdir(parents=True, exist_ok=True)
 
                     if dest.exists():
-                        print_warning(f"冲突: {rel_path} 已存在，备份后覆盖")
+                        # 冲突检测：输出 diff 摘要
+                        conflict_count += 1
+                        print_warning(f"冲突: {rel_path}")
+                        try:
+                            import difflib
+                            old_content = dest.read_text(encoding='utf-8', errors='replace')
+                            new_content = file_path.read_text(encoding='utf-8', errors='replace')
+                            diff = difflib.unified_diff(
+                                old_content.splitlines(keepends=True),
+                                new_content.splitlines(keepends=True),
+                                fromfile=str(dest), tofile=str(file_path),
+                                lineterm=''
+                            )
+                            diff_text = ''.join(diff)
+                            if diff_text:
+                                summary_lines = [l for l in diff_text.split('\n') if
+                                                 l.startswith(('+', '-')) and not l.startswith(('+++', '---'))]
+                                added = sum(1 for l in summary_lines if l.startswith('+'))
+                                removed = sum(1 for l in summary_lines if l.startswith('-'))
+                                print_info(f"  Diff: +{added}/-{removed} 行变更")
+                        except Exception:
+                            pass
+
                         backup = dest.with_suffix(dest.suffix + ".bak")
                         shutil.copy2(dest, backup)
 
                     shutil.copy2(file_path, dest)
                     merged_count += 1
-                    print_success(f"合并: {rel_path}")
+                    self.files_modified.append(str(rel_path))
+
+                    # 合并后校验 Python 文件语法
+                    if dest.suffix == '.py':
+                        try:
+                            import ast
+                            ast.parse(dest.read_text(encoding='utf-8'))
+                        except SyntaxError as e:
+                            validation_errors.append(f"{rel_path}: {e}")
+                            print_error(f"语法错误: {rel_path} - {e}")
 
         print_info(f"共合并 {merged_count} 个文件到 {self.project_dir}")
+
+        # 合并摘要报告
+        print_banner("📊 合并摘要", Colors.CYAN)
+        print(f"  {Colors.BOLD}文件合并:{Colors.END} {merged_count}")
+        print(f"  {Colors.BOLD}冲突处理:{Colors.END} {conflict_count}")
+        if validation_errors:
+            print(f"  {Colors.RED}{Colors.BOLD}语法错误:{Colors.END} {len(validation_errors)}")
+            for err in validation_errors:
+                print(f"    {Colors.RED}✗{Colors.END} {err}")
+        else:
+            print(f"  {Colors.GREEN}{Colors.BOLD}语法校验:{Colors.END} 全部通过")
 
         self.timer.checkpoint("phase3_merge")
 
@@ -445,15 +418,17 @@ class Orchestrator:
 
             for issue in issues:
                 print_step(f"修复: {issue['description']}")
-                # 使用 Claude API 修复全局问题
+                fix_prompt = f"""{ORCHESTRATOR_EXECUTION_PROMPT}
+
+修复以下全局问题:
+问题: {issue['description']}
+文件路径: {issue.get('file', '')}
+问题详情: {issue.get('detail', '')}
+
+工作区: {self.project_dir}"""
+
                 try:
-                    fix_result = run_agent_loop(
-                        task_description=f"修复以下全局问题:\n{issue['description']}\n\n文件路径: {issue.get('file', '')}\n问题详情: {issue.get('detail', '')}",
-                        workspace=str(self.project_dir),
-                        system_prompt=ORCHESTRATOR_EXECUTION_PROMPT,
-                        project_dir=str(self.project_dir),
-                        max_iterations=5
-                    )
+                    fix_result = run_claude_cli(fix_prompt, str(self.project_dir))
                     if fix_result["success"]:
                         print_success(f"已修复: {issue['description']}")
                     else:
@@ -467,46 +442,39 @@ class Orchestrator:
         self.timer.checkpoint("phase4_validate")
 
     def _detect_global_issues(self) -> List[Dict]:
-        """通过 Claude API 检测全局问题"""
-        try:
-            client = create_llm_client()
+        """通过 claude CLI 检测全局问题"""
+        # 收集项目中所有代码文件的内容摘要（跨平台大小写不敏感）
+        code_files = []
+        code_exts = {'.py', '.ts', '.tsx', '.js', '.jsx', '.sql', '.json'}
+        for f in self.project_dir.rglob("*"):
+            if f.suffix.lower() in code_exts:
+                if 'node_modules' not in str(f) and '__pycache__' not in str(f) and '.venv' not in str(f):
+                    try:
+                        content = f.read_text(encoding='utf-8', errors='replace')
+                        code_files.append(f"### {f.relative_to(self.project_dir)}\n{content[:2000]}")
+                    except:
+                        pass
 
-            # 收集项目中所有代码文件的内容摘要（跨平台大小写不敏感）
-            code_files = []
-            code_exts = {'.py', '.ts', '.tsx', '.js', '.jsx', '.sql', '.json'}
-            for f in self.project_dir.rglob("*"):
-                if f.suffix.lower() in code_exts:
-                    if 'node_modules' not in str(f) and '__pycache__' not in str(f):
-                        try:
-                            content = f.read_text(encoding='utf-8', errors='replace')
-                            code_files.append(f"### {f.relative_to(self.project_dir)}\n{content[:2000]}")
-                        except:
-                            pass
-
-            if not code_files:
-                return []
-
-            code_snapshot = "\n\n".join(code_files[:20])  # 限制上下文大小
-
-            response = client.messages.create(
-                model=ANTHROPIC_MODEL,
-                max_tokens=4096,
-                system="你是一个代码审查专家。检测项目中的全局性问题：模块间API不一致、缺失的导入、循环依赖、配置冲突等。返回 JSON 数组: [{\"type\": \"architecture|module|config\", \"description\": \"问题描述\", \"file\": \"文件路径\", \"detail\": \"详细信息\"}]。如果没有问题返回空数组 []。",
-                messages=[{"role": "user", "content": f"审查以下项目代码，检测全局问题:\n\n{code_snapshot}"}]
-            )
-
-            raw = response.content[0].text
-            if "```json" in raw:
-                raw = raw.split("```json")[1].split("```")[0]
-            elif "```" in raw:
-                raw = raw.split("```")[1].split("```")[0]
-
-            issues = json.loads(raw.strip())
-            return issues if isinstance(issues, list) else []
-
-        except Exception as e:
-            print_warning(f"全局检测异常: {e}")
+        if not code_files:
             return []
+
+        code_snapshot = "\n\n".join(code_files[:20])  # 限制上下文大小
+
+        prompt = f"""你是一个代码审查专家。检测项目中的全局性问题：模块间API不一致、缺失的导入、循环依赖、配置冲突等。
+返回 JSON 数组: [{{"type": "architecture|module|config", "description": "问题描述", "file": "文件路径", "detail": "详细信息"}}]。
+如果没有问题返回空数组 []。
+
+审查以下项目代码，检测全局问题:
+
+{code_snapshot}"""
+
+        result = run_claude_cli(prompt, str(self.project_dir))
+        if not result["success"]:
+            print_warning(f"全局检测异常: {result.get('error', 'Unknown')}")
+            return []
+
+        issues = parse_json_from_output(result["output"])
+        return issues if isinstance(issues, list) else []
 
 
 # ============================================================

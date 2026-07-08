@@ -1,7 +1,7 @@
 """
 Claude Code 父子多层嵌套自适应Loop系统
 ========================================
-全栈高阶多Agent方案 - 自适应双模式切换
+全栈高阶多Agent方案 - 复杂任务多层嵌套Loop调度
 """
 
 __version__ = "2.2.0"
@@ -15,16 +15,14 @@ from .config import (
     BASE_DIR, WORKSPACES_DIR, LOGS_DIR
 )
 from .orchestrator import Orchestrator
-from .child_agent import ChildAgent
-from .utils import analyze_complexity, Logger, Timer, setup_workspace
+from .utils import Logger, Timer, setup_workspace, run_claude_cli
 
 __all__ = [
     "Orchestrator",
-    "ChildAgent",
-    "analyze_complexity",
     "Logger",
     "Timer",
     "setup_workspace",
+    "run_claude_cli",
     "Colors",
     "SubTask",
     "LoopState",

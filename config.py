@@ -6,8 +6,8 @@ Claude Code 父子多层嵌套自适应Loop系统 - 全局配置
 
 import os
 import sys
-from pathlib import Path
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Dict, Optional
 
 # ============================================================
@@ -22,7 +22,6 @@ LOGS_DIR = BASE_DIR / "logs"
 # ============================================================
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
 ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 # 网络隔离开关
 DISABLE_NETWORK_CHECK = True
@@ -40,32 +39,6 @@ MAX_CHILD_ITERATIONS = 15
 MAX_GLOBAL_FIX_ITERATIONS = 5
 # 任务超时（秒）
 TASK_TIMEOUT = 3600
-
-# ============================================================
-# 复杂度判定规则
-# ============================================================
-SIMPLE_TASK_KEYWORDS = [
-    "单文件", "修复", "bug", "配置修改", "代码格式", "注释",
-    "单接口", "局部修改", "小改动", "单页面", "单函数",
-    "修改变量名", "添加日志", "错误处理", "单模块",
-    "fix bug", "config", "format", "typo", "single file",
-    "minor fix", "small change", "one line", "空指针",
-    "NullPointer", "null pointer", "小改", "修一下",
-    "改一下", "调一下", "微调", "hotfix", "hot fix",
-    "补丁", "patch", "简单修改", "小问题", "简单",
-    "修改配置", "改配置", "调整", "改动不大",
-    "改为", "改成", "添加字段", "增加字段", "新增字段",
-    "超时时间", "连接超时", "参数调整", "改个",
-    "添加", "增加", "字段", "新增",
-]
-
-COMPLEX_TASK_KEYWORDS = [
-    "全栈", "重构", "跨模块", "数据库改造", "批量", "多文件",
-    "多模块", "完整业务", "架构", "CI/CD", "部署", "全链路",
-    "新增功能", "系统", "平台", "多个接口", "前后端",
-    "fullstack", "refactor", "migration", "architecture",
-    "multi-module", "platform", "system design"
-]
 
 # ============================================================
 # 子Agent配置
@@ -125,81 +98,7 @@ class Colors:
         return hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
 
 # ============================================================
-# Claude API 工具定义
-# ============================================================
-TOOL_DEFINITIONS = [
-    {
-        "name": "read_file",
-        "description": "读取指定路径的文件内容。用于理解现有代码、配置或文档。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "要读取的文件路径（相对于工作区的路径或绝对路径）"
-                }
-            },
-            "required": ["path"]
-        }
-    },
-    {
-        "name": "write_file",
-        "description": "创建或覆盖文件。用于生成新代码、配置或文档文件。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "要写入的文件路径（相对于工作区）"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "要写入的完整文件内容"
-                }
-            },
-            "required": ["path", "content"]
-        }
-    },
-    {
-        "name": "edit_file",
-        "description": "编辑文件中的特定部分。通过精确匹配 old_string 并替换为 new_string 来修改文件。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "要编辑的文件路径（相对于工作区）"
-                },
-                "old_string": {
-                    "type": "string",
-                    "description": "要替换的原始文本（必须精确匹配）"
-                },
-                "new_string": {
-                    "type": "string",
-                    "description": "替换后的新文本"
-                }
-            },
-            "required": ["path", "old_string", "new_string"]
-        }
-    },
-    {
-        "name": "run_command",
-        "description": "执行 shell 命令并返回输出。用于运行测试、lint、构建等命令。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "要执行的 shell 命令"
-                }
-            },
-            "required": ["command"]
-        }
-    }
-]
-
-# ============================================================
-# Claude API 系统提示词
+# Claude API 系统提示词（用于构建 claude CLI prompt）
 # ============================================================
 ORCHESTRATOR_PLANNING_PROMPT = """你是一个资深技术架构师。分析用户的任务需求，生成详细的实施方案。
 
