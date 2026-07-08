@@ -48,11 +48,13 @@ def _find_unix_shell() -> Optional[str]:
     return None
 
 
+_SHELL_CACHE = _find_unix_shell()
+
 def _get_shell() -> Optional[str]:
     """返回当前平台可用的最佳 shell，None 表示使用系统默认"""
     if not _IS_WINDOWS:
         return None  # Linux/macOS 直接用默认 shell
-    return _find_unix_shell()
+    return _SHELL_CACHE
 
 
 def _translate_command(command: str) -> str:
@@ -60,7 +62,7 @@ def _translate_command(command: str) -> str:
     if not _IS_WINDOWS:
         return command
 
-    shell = _find_unix_shell()
+    shell = _SHELL_CACHE
     if shell:
         # 有 Unix shell 可用，直接透传
         return command
@@ -201,34 +203,42 @@ def cleanup_workspace(name: str):
 # ============================================================
 # Claude CLI 调用
 # ============================================================
-def run_claude_cli(prompt: str, workspace: str, timeout: int = 3600) -> Dict:
+def run_claude_cli(prompt: str, workspace: str, timeout: int = 3600,
+                   skip_permissions: bool = False) -> Dict:
     """
     调用 claude CLI 执行任务（非交互模式）
     返回: {"success": bool, "output": str, "errors": str}
     """
-    # 确保 workspace 有权限配置，允许文件操作
     ws_path = Path(workspace)
     ws_path.mkdir(parents=True, exist_ok=True)
-    claude_dir = ws_path / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-    settings_file = claude_dir / "settings.local.json"
-    if not settings_file.exists():
-        settings_file.write_text(json.dumps({
-            "permissions": {
-                "allow": [
-                    "Read(*)",
-                    "Write(*)",
-                    "Edit(*)",
-                    "Bash(*)",
-                    "Glob(*)",
-                    "Grep(*)"
-                ]
-            }
-        }, indent=2), encoding='utf-8')
+
+    # 构建 claude 命令
+    cmd = ["claude", "-p", prompt, "--add-dir", workspace]
+
+    if skip_permissions:
+        cmd.append("--dangerously-skip-permissions")
+    else:
+        # 非跳过模式：生成权限配置文件
+        claude_dir = ws_path / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        settings_file = claude_dir / "settings.local.json"
+        if not settings_file.exists():
+            settings_file.write_text(json.dumps({
+                "permissions": {
+                    "allow": [
+                        "Read(*)",
+                        "Write(*)",
+                        "Edit(*)",
+                        "Bash(*)",
+                        "Glob(*)",
+                        "Grep(*)"
+                    ]
+                }
+            }, indent=2), encoding='utf-8')
 
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--add-dir", workspace],
+            cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -251,12 +261,30 @@ def run_claude_cli(prompt: str, workspace: str, timeout: int = 3600) -> Dict:
 
 
 def parse_json_from_output(output: str) -> Optional[Any]:
-    """从 claude CLI 输出中提取 JSON（支持 markdown 代码块）"""
+    """从 claude CLI 输出中提取 JSON（支持 markdown 代码块和文本中嵌入的 JSON）"""
     raw = output
+    # 优先提取 markdown 代码块
     if "```json" in raw:
         raw = raw.split("```json")[1].split("```")[0]
     elif "```" in raw:
         raw = raw.split("```")[1].split("```")[0]
+    else:
+        # 从文本中查找 JSON 对象/数组边界
+        for start_char, end_char in [("{", "}"), ("[", "]")]:
+            start = raw.find(start_char)
+            if start == -1:
+                continue
+            depth = 0
+            for i, ch in enumerate(raw[start:], start):
+                if ch == start_char:
+                    depth += 1
+                elif ch == end_char:
+                    depth -= 1
+                    if depth == 0:
+                        raw = raw[start:i + 1]
+                        break
+            if depth == 0:
+                break
     try:
         return json.loads(raw.strip())
     except (json.JSONDecodeError, IndexError):
@@ -267,7 +295,7 @@ def parse_json_from_output(output: str) -> Optional[Any]:
 # 子Agent调度
 # ============================================================
 def run_child_agent(workspace: str, task: Dict, project_dir: str = None,
-                    timeout: int = 3600) -> Dict:
+                    timeout: int = 3600, skip_permissions: bool = False) -> Dict:
     """
     使用 claude CLI 执行子任务
     返回: {success, output, errors, workspace, summary}
@@ -313,7 +341,7 @@ def run_child_agent(workspace: str, task: Dict, project_dir: str = None,
     ])
 
     prompt = "\n".join(prompt_parts)
-    result = run_claude_cli(prompt, workspace, timeout)
+    result = run_claude_cli(prompt, workspace, timeout, skip_permissions=skip_permissions)
     result["workspace"] = workspace
     if result["success"]:
         result["summary"] = result.get("output", "")[:500]

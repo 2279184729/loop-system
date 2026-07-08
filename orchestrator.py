@@ -27,7 +27,8 @@ from config import (
     Colors, SubTask, LoopState,
     MAX_PLAN_ITERATIONS,
     MAX_GLOBAL_FIX_ITERATIONS,
-    ORCHESTRATOR_PLANNING_PROMPT, ORCHESTRATOR_EXECUTION_PROMPT
+    ORCHESTRATOR_PLANNING_PROMPT, ORCHESTRATOR_EXECUTION_PROMPT,
+    DANGEROUSLY_SKIP_PERMISSIONS
 )
 from utils import (
     print_banner, print_phase, print_step, print_success,
@@ -42,7 +43,7 @@ class Orchestrator:
     父调度Agent - 全局唯一总控大脑
     """
 
-    def __init__(self, project_dir: str = None):
+    def __init__(self, project_dir: str = None, skip_permissions: bool = None):
         self.project_dir = Path(project_dir) if project_dir else Path.cwd()
         self.logger = Logger("orchestrator")
         self.timer = Timer()
@@ -50,6 +51,7 @@ class Orchestrator:
         self.subtasks: List[SubTask] = []
         self.plan: Optional[Dict] = None
         self.all_results: List[Dict] = []
+        self.skip_permissions = skip_permissions if skip_permissions is not None else DANGEROUSLY_SKIP_PERMISSIONS
         self.files_modified: List[str] = []
 
     def execute(self, task_description: str) -> Dict:
@@ -142,7 +144,7 @@ class Orchestrator:
 
 {task}"""
 
-        result = run_claude_cli(prompt, str(self.project_dir))
+        result = run_claude_cli(prompt, str(self.project_dir), skip_permissions=self.skip_permissions)
         if not result["success"]:
             print_warning(f"Claude CLI 规划失败: {result.get('error', 'Unknown')}，使用通用方案")
             return self._fallback_plan(task)
@@ -177,7 +179,7 @@ class Orchestrator:
 
 {json.dumps(plan, ensure_ascii=False, indent=2)}"""
 
-        result = run_claude_cli(prompt, str(self.project_dir))
+        result = run_claude_cli(prompt, str(self.project_dir), skip_permissions=self.skip_permissions)
         if result["success"]:
             refined = parse_json_from_output(result["output"])
             if refined:
@@ -223,7 +225,7 @@ class Orchestrator:
         self.state.total_subtasks = len(self.subtasks)
 
         # 按优先级和依赖关系分组
-        batches = self._group_by_dependency()
+        batches = self.topological_group()
 
         for batch_idx, batch in enumerate(batches):
             print_step(f"批次 {batch_idx + 1}/{len(batches)}: 并行执行 {len(batch)} 个子任务")
@@ -266,7 +268,7 @@ class Orchestrator:
 
         self.timer.checkpoint("phase2_execute")
 
-    def _group_by_dependency(self) -> List[List[SubTask]]:
+    def topological_group(self) -> List[List[SubTask]]:
         """按依赖关系分组子任务"""
         completed = set()
         batches = []
@@ -310,7 +312,8 @@ class Orchestrator:
         }
 
         # 调用子Agent进程，传入项目目录以便读取上下文
-        result = run_child_agent(str(workspace), task_payload, str(self.project_dir))
+        result = run_child_agent(str(workspace), task_payload, str(self.project_dir),
+                                 skip_permissions=self.skip_permissions)
         return result
 
     # ================================================================
@@ -428,7 +431,8 @@ class Orchestrator:
 工作区: {self.project_dir}"""
 
                 try:
-                    fix_result = run_claude_cli(fix_prompt, str(self.project_dir))
+                    fix_result = run_claude_cli(fix_prompt, str(self.project_dir),
+                                                skip_permissions=self.skip_permissions)
                     if fix_result["success"]:
                         print_success(f"已修复: {issue['description']}")
                     else:
@@ -468,7 +472,7 @@ class Orchestrator:
 
 {code_snapshot}"""
 
-        result = run_claude_cli(prompt, str(self.project_dir))
+        result = run_claude_cli(prompt, str(self.project_dir), skip_permissions=self.skip_permissions)
         if not result["success"]:
             print_warning(f"全局检测异常: {result.get('error', 'Unknown')}")
             return []
@@ -483,23 +487,30 @@ class Orchestrator:
 def main():
     """命令行入口"""
     if len(sys.argv) < 2:
-        print("用法: python orchestrator.py <任务描述> [--project-dir <项目目录>]")
+        print("用法: python orchestrator.py <任务描述> [--project-dir <项目目录>] [--skip-permissions]")
         print()
         print("示例:")
         print('  python orchestrator.py "修复登录接口空指针bug"')
         print('  python orchestrator.py "从零搭建全栈用户管理系统"')
-        print('  python orchestrator.py "重构项目代码结构"')
+        print('  python orchestrator.py "重构项目代码结构" --skip-permissions')
+        print()
+        print("选项:")
+        print("  --project-dir <目录>   指定项目输出目录")
+        print("  --skip-permissions     跳过 claude CLI 权限检查（使用 --dangerously-skip-permissions）")
         sys.exit(1)
 
     task_description = sys.argv[1]
     project_dir = None
+    skip_permissions = DANGEROUSLY_SKIP_PERMISSIONS  # 默认使用环境变量配置
 
     # 解析可选参数
     for i, arg in enumerate(sys.argv):
         if arg == "--project-dir" and i + 1 < len(sys.argv):
             project_dir = sys.argv[i + 1]
+        elif arg == "--skip-permissions":
+            skip_permissions = True
 
-    orchestrator = Orchestrator(project_dir=project_dir)
+    orchestrator = Orchestrator(project_dir=project_dir, skip_permissions=skip_permissions)
     result = orchestrator.execute(task_description)
 
     # 输出最终结果
