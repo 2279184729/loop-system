@@ -5,12 +5,12 @@ Claude Code 父子多层嵌套自适应Loop系统 - 子执行Agent模块
 通过 Claude API + Tool Use 实现真实代码生成和验证
 """
 
+import io
 import json
 import sys
-import io
 
-# 修复Windows GBK编码问题
-if sys.platform == 'win32':
+# 修复Windows GBK编码问题（仅在直接运行时）
+if sys.platform == 'win32' and __name__ == '__main__':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
@@ -108,6 +108,7 @@ class ChildAgent:
     def _run_tests(self) -> Dict:
         """在工作区中运行测试"""
         details = []
+        all_passed = True
 
         # 查找测试文件
         test_patterns = ("test_*.py", "Test_*.py", "*_test.py", "*_Test.py", "*.test.*", "*.Test.*")
@@ -133,11 +134,14 @@ class ChildAgent:
                 if result.returncode == 0:
                     print(f"  {Colors.GREEN}  ✓ 测试通过{Colors.END}")
                 else:
+                    all_passed = False
                     print(f"  {Colors.RED}  ✗ 测试失败{Colors.END}")
             except subprocess.TimeoutExpired:
+                all_passed = False
                 details.append(f"{test_file.name}: 测试超时")
                 print(f"  {Colors.RED}  ✗ 测试超时{Colors.END}")
             except Exception as e:
+                all_passed = False
                 details.append(f"{test_file.name}: 运行错误 - {e}")
                 print(f"  {Colors.RED}  ✗ 运行错误: {e}{Colors.END}")
 
@@ -155,12 +159,11 @@ class ChildAgent:
                 if result.returncode == 0:
                     print(f"  {Colors.GREEN}  ✓ npm test 通过{Colors.END}")
                 else:
+                    all_passed = False
                     print(f"  {Colors.RED}  ✗ npm test 失败{Colors.END}")
             except Exception as e:
+                all_passed = False
                 details.append(f"npm test: 运行错误 - {e}")
-
-        all_passed = all("FAILED" not in d and "failed" not in d.lower() and "error" not in d.lower()
-                         for d in details if d)
 
         return {"passed": all_passed, "details": details}
 

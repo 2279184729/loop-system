@@ -6,11 +6,11 @@
 """
 
 import ast
-import sys
 import io
+import sys
 
-# 修复Windows GBK编码问题
-if sys.platform == 'win32':
+# 修复Windows GBK编码问题（仅在直接运行时）
+if sys.platform == 'win32' and __name__ == '__main__':
     try:
         if not isinstance(sys.stdout, io.TextIOWrapper) or sys.stdout.encoding != 'utf-8':
             sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -20,9 +20,8 @@ if sys.platform == 'win32':
 
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Tuple
 from dataclasses import dataclass, field
-from collections import defaultdict
 
 
 @dataclass

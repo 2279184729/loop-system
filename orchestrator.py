@@ -9,12 +9,14 @@ Claude Code 父子多层嵌套自适应Loop系统 - 父调度Agent核心引擎
   5. 全局自检修复闭环
 """
 
+import ast
+import difflib
 import io
 import json
 import sys
 
-# 修复Windows GBK编码问题
-if sys.platform == 'win32':
+# 修复Windows GBK编码问题（仅在直接运行时）
+if sys.platform == 'win32' and __name__ == '__main__':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
 
@@ -351,7 +353,6 @@ class Orchestrator:
                         conflict_count += 1
                         print_warning(f"冲突: {rel_path}")
                         try:
-                            import difflib
                             old_content = dest.read_text(encoding='utf-8', errors='replace')
                             new_content = file_path.read_text(encoding='utf-8', errors='replace')
                             diff = difflib.unified_diff(
@@ -380,7 +381,6 @@ class Orchestrator:
                     # 合并后校验 Python 文件语法
                     if dest.suffix == '.py':
                         try:
-                            import ast
                             ast.parse(dest.read_text(encoding='utf-8'))
                         except SyntaxError as e:
                             validation_errors.append(f"{rel_path}: {e}")

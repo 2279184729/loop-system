@@ -5,12 +5,12 @@ plan → build → test → review → next 持续迭代循环
 支持自动 git commit、进度追踪、状态持久化
 """
 
+import io
 import json
 import sys
-import io
 
-# 修复Windows GBK编码问题
-if sys.platform == 'win32':
+# 修复Windows GBK编码问题（仅在直接运行时）
+if sys.platform == 'win32' and __name__ == '__main__':
     try:
         if not isinstance(sys.stdout, io.TextIOWrapper) or sys.stdout.encoding != 'utf-8':
             sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -18,7 +18,6 @@ if sys.platform == 'win32':
     except (ValueError, AttributeError):
         pass
 
-import time
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional

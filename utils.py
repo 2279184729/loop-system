@@ -141,6 +141,7 @@ class Logger:
 
     def __init__(self, name: str = "orchestrator"):
         self.name = name
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
         self.log_file = LOGS_DIR / f"{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         self.entries: List[Dict] = []
 
@@ -270,7 +271,7 @@ def parse_json_from_output(output: str) -> Optional[Any]:
         raw = raw.split("```")[1].split("```")[0]
     else:
         # 从文本中查找 JSON 对象/数组边界
-        for start_char, end_char in [("{", "}"), ("[", "]")]:
+        for start_char, end_char in [("[", "]"), ("{", "}")]:
             start = raw.find(start_char)
             if start == -1:
                 continue
